@@ -1,12 +1,44 @@
 import logging
 import re
-from datetime import date
+from datetime import date, datetime
 import httpx
 import anthropic
 from google import genai
 from google.genai import types as gtypes
 
 from config import settings
+
+# ── Daily cost tracking ─────────────────────────────────────────────────────
+
+_cost_today: float = 0.0
+_cost_date: str = ""
+_cost_calls: int = 0
+
+
+def _track_cost(input_tokens: int, output_tokens: int, model: str = "claude") -> None:
+    global _cost_today, _cost_date, _cost_calls
+    today = date.today().isoformat()
+    if _cost_date != today:
+        _cost_today = 0.0
+        _cost_calls = 0
+        _cost_date = today
+    # Claude Sonnet 4: $3/M input, $15/M output
+    # Grok: ~$3/M input, $15/M output (similar)
+    if "claude" in model:
+        cost = (input_tokens * 3 + output_tokens * 15) / 1_000_000
+    elif "grok" in model:
+        cost = (input_tokens * 3 + output_tokens * 15) / 1_000_000
+    else:
+        cost = 0.0
+    _cost_today += cost
+    _cost_calls += 1
+
+
+def get_daily_cost() -> str:
+    today = date.today().isoformat()
+    if _cost_date != today:
+        return f"Today ({today}): $0.00 — 0 API calls. Gemini calls are free."
+    return f"Today ({_cost_date}): ${_cost_today:.4f} — {_cost_calls} paid API calls. Gemini calls are free."
 from tools.fetch import fetch_url, SCHEMA as FETCH_SCHEMA
 from tools.pdf import fetch_pdf, fetch_pdf_bytes, SCHEMA as PDF_SCHEMA
 from tools.weather import get_weather
@@ -133,6 +165,7 @@ async def _run_claude(user_message: str, history: list) -> tuple[str, str]:
         logger.info("Claude stop_reason=%s iter=%d", response.stop_reason, iteration)
 
         if response.stop_reason == "end_turn":
+            _track_cost(response.usage.input_tokens, response.usage.output_tokens, "claude")
             text = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
             if len(text) > settings.max_response_chars:
                 text = text[: settings.max_response_chars].rsplit(" ", 1)[0] + "…"
@@ -160,6 +193,28 @@ async def _run_claude(user_message: str, history: list) -> tuple[str, str]:
         break
 
     return "Could not complete that request.", "claude"
+
+
+# ── Grok (xAI — free-form via /grok command) ────────────────────────────────
+
+async def _run_grok(user_message: str, history: list) -> str:
+    system = _system_prompt()
+    messages = [{"role": "assistant" if r == "assistant" else "user", "content": t} for r, t in history]
+    messages.append({"role": "user", "content": user_message})
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings.xai_api_key}"},
+            json={"model": "grok-4.3", "messages": [{"role": "system", "content": system}] + messages, "max_tokens": 512},
+        )
+        resp.raise_for_status()
+    data = resp.json()
+    text = data["choices"][0]["message"]["content"].strip()
+    usage = data.get("usage", {})
+    _track_cost(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), "grok")
+    if len(text) > settings.max_response_chars:
+        text = text[:settings.max_response_chars].rsplit(" ", 1)[0] + "…"
+    return text
 
 
 # ── Image helpers ────────────────────────────────────────────────────────────
@@ -374,15 +429,83 @@ async def cmd_stocks(args: str) -> str:
     return "\n".join(results)
 
 
+async def cmd_search(args: str) -> str:
+    if not args.strip():
+        return "Usage: /search <query>"
+    prompt = (
+        f"Search the web for: {args.strip()}\n"
+        "Return the most relevant result. Include: title, URL, and a 2-3 sentence summary. "
+        "Plain text, no markdown."
+    )
+    answer, _ = await _run_claude(prompt, [])
+    return answer
+
+
+async def cmd_sports(args: str) -> str:
+    if not args.strip():
+        return "Usage: /sports <topic>  e.g. /sports world cup"
+    prompt = (
+        f"Latest results and scores for: {args.strip()}. "
+        "Include scores, dates, upcoming matches if relevant. Plain text, concise."
+    )
+    try:
+        answer, _ = await _run_gemini(prompt, [])
+    except Exception:
+        answer, _ = await _run_claude(prompt, [])
+    return answer
+
+
+async def cmd_retrieve(args: str) -> tuple[str, list]:
+    if not args.strip():
+        return "Usage: /retrieve <work>  e.g. /retrieve shakespeare sonnet 43", []
+    prompt = (
+        f"Retrieve the full text of: {args.strip()}. "
+        "Return the complete original text — do not summarize or truncate. "
+        "Include title and author at the top. Plain text, no markdown."
+    )
+    response = await _claude.messages.create(
+        model=settings.claude_model, max_tokens=4096,
+        system="You retrieve and reproduce full texts of literary works. Return complete text, never summarize.",
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    _track_cost(response.usage.input_tokens, response.usage.output_tokens, "claude")
+    text = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
+    attachments = _maybe_pdf(text, args.strip())
+    return text, attachments
+
+
+def _maybe_pdf(text: str, title: str) -> list:
+    """If text exceeds comfortable Telegram reading length, also send as PDF."""
+    if len(text) <= 1500:
+        return []
+    try:
+        from tools.pdf import text_to_pdf
+        pdf_bytes = text_to_pdf(text, title)
+        filename = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")[:40] + ".pdf"
+        return [{"type": "document", "data": pdf_bytes, "filename": filename}]
+    except Exception as exc:
+        logger.warning("PDF generation failed: %s", exc)
+        return []
+
+
+async def cmd_cost(args: str) -> str:
+    return get_daily_cost()
+
+
 COMMANDS = {
-    "weather": cmd_weather,
-    "wiki":    cmd_wiki,
-    "flight":  cmd_flight,
-    "news":    cmd_news,
-    "pdf":     cmd_pdf,
-    "image":   cmd_image,
-    "tr":      cmd_tr,
-    "stocks":  cmd_stocks,
+    "weather":  cmd_weather,
+    "wiki":     cmd_wiki,
+    "flight":   cmd_flight,
+    "news":     cmd_news,
+    "pdf":      cmd_pdf,
+    "image":    cmd_image,
+    "tr":       cmd_tr,
+    "stocks":   cmd_stocks,
+    "search":   cmd_search,
+    "sports":   cmd_sports,
+    "retrieve": cmd_retrieve,
+    "cost":     cmd_cost,
 }
 
 
@@ -403,6 +526,17 @@ async def run_agent(user_message: str, history: list = None, preferred_model: st
         except Exception:
             answer, model = await _run_claude(user_message, history)
         return answer, model, attachments
+
+    # Explicit model routing
+    if preferred_model == "claude":
+        logger.info("Routing to Claude (user choice)")
+        text, model = await _run_claude(user_message, history)
+        return text, model, []
+
+    if preferred_model == "grok":
+        logger.info("Routing to Grok (user choice)")
+        text = await _run_grok(user_message, history)
+        return text, "grok", []
 
     if _needs_fetch(user_message, history):
         logger.info("Routing to Claude (fetch needed)")

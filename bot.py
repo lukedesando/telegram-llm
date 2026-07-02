@@ -5,7 +5,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 from config import settings
-from agent import run_agent, COMMANDS
+from agent import run_agent, COMMANDS, _maybe_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     history.append(("user", text))
     history.append(("assistant", answer))
 
-    await update.message.reply_text(answer)
+    # Auto-PDF for long responses
+    attachments.extend(_maybe_pdf(answer, text[:60]))
+
+    if answer:
+        await update.message.reply_text(answer)
     await _send_attachments(update, attachments)
 
 
@@ -74,6 +78,16 @@ async def _send_attachments(update: Update, attachments: list) -> None:
                 await update.message.reply_document(doc, filename=att.get("filename", "file"))
         except Exception as exc:
             logger.warning("Failed to send attachment: %s", exc)
+
+
+async def handle_model_switch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user is None or user.id != settings.telegram_allowed_user_id:
+        return
+    cmd = (update.message.text or "").lstrip("/").split()[0].lower()
+    chat_id = update.effective_chat.id
+    _model[chat_id] = cmd
+    await update.message.reply_text(f"Next prompts use {cmd}.")
 
 
 async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -131,11 +145,16 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "/weather <city> — current weather\n"
         "/flight <LH441> — live flight status\n"
         "/news [topic] — top headlines\n"
+        "/search <query> — web search (top result)\n"
+        "/sports <topic> — scores and results\n"
+        "/retrieve <work> — full text (poems, etc.)\n"
         "/pdf <url or name> — fetch, summarize + send PDF\n"
         "/image <topic> — find and send an image\n"
         "/wiki <topic> — Grokipedia summary via Grok\n"
         "/stocks <AAPL TSLA ...> — live stock quotes\n"
         "/tr <lang> <text> — translate\n"
+        "/claude /gemini /grok — switch AI model\n"
+        "/cost — today's API spend\n"
         "/clear — reset conversation\n"
         "/help — this list"
     )
@@ -151,6 +170,8 @@ def build_application() -> Application:
     )
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(CommandHandler("help", handle_help))
+    for model_cmd in ("claude", "gemini", "grok"):
+        app.add_handler(CommandHandler(model_cmd, handle_model_switch))
     for cmd in COMMANDS:
         app.add_handler(CommandHandler(cmd, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

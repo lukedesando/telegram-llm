@@ -48,3 +48,50 @@ async def fetch_pdf_bytes(url: str) -> tuple[bytes, str]:
     if not filename.endswith(".pdf"):
         filename += ".pdf"
     return resp.content, filename
+
+
+def text_to_pdf(text: str, title: str = "") -> bytes:
+    """Generate a simple PDF from plain text."""
+    doc = pymupdf.open()
+    width, height = 595, 842  # A4
+    margin = 50
+    font_size = 11
+    line_height = font_size * 1.4
+    usable_w = width - 2 * margin
+    usable_h = height - 2 * margin
+
+    lines = []
+    for paragraph in text.split("\n"):
+        if not paragraph.strip():
+            lines.append("")
+            continue
+        words = paragraph.split()
+        current = ""
+        for word in words:
+            test = f"{current} {word}".strip()
+            if pymupdf.get_text_length(test, fontsize=font_size) <= usable_w:
+                current = test
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+
+    y = margin
+    page = doc.new_page(width=width, height=height)
+
+    if title:
+        title_size = 14
+        page.insert_text((margin, y + title_size), title, fontsize=title_size)
+        y += title_size * 2.5
+
+    for line in lines:
+        if y + line_height > height - margin:
+            page = doc.new_page(width=width, height=height)
+            y = margin
+        page.insert_text((margin, y + font_size), line, fontsize=font_size)
+        y += line_height
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
