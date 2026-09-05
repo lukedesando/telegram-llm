@@ -2,30 +2,49 @@
 
 A single-user Telegram AI relay optimized for constrained inflight connectivity and self-hosted deployment.
 
-This repository is a fork of [`eloquentix/hermes`](https://github.com/eloquentix/hermes) and retains its MIT license. The fork is being narrowed around a specific flight-readiness target: Telegram transport, durable conversation state, OpenAI as the final model provider, and a small set of high-value tools.
+This repository is a fork of [`eloquentix/hermes`](https://github.com/eloquentix/hermes) and retains its MIT license. The fork is narrowed around a flight-readiness target: Telegram transport, durable conversation state, OpenAI, and a small set of high-value tools.
 
 ## Flight-build scope
 
 The pre-flight build intentionally supports only:
 
-- normal AI conversation
+- normal AI conversation with optional hosted web search
 - `/search <query>` — current web search
 - `/news [topic]` — current news
-- `/weather <city>` — weather
-- `/flight <UA123>` — flight status
-- `/pdf <url>` — fetch and summarize a PDF
+- `/weather <city>` — direct weather lookup
+- `/flight <UA123>` — current flight status
+- `/pdf <url>` — download, locally extract, summarize, and return a PDF
 - `/clear` — reset the current conversation
 - `/help` — command list
 
-Explicitly deferred until after flight qualification: Grok/xAI, image search, stocks, translation, sports, literary retrieval, WhatsApp, RCS, multi-user support, vector memory, dashboard/UI, voice, and Homebrew-managed deployment.
+Explicitly deferred until after flight qualification: Grok/xAI, Gemini, Claude, image search, stocks, translation, sports, literary retrieval, WhatsApp, RCS, multi-user support, vector memory, dashboard/UI, voice, and Homebrew-managed deployment.
 
-## Current migration state
+## Current architecture
 
-The Telegram adapter now uses a transport-neutral conversation service backed by SQLite. Raw user/assistant messages remain durable across process restarts. Model context uses a rolling summary plus uncompacted recent messages; compaction never deletes raw history.
+The Telegram adapter uses a transport-neutral conversation service backed by SQLite. Raw user/assistant messages remain durable across process restarts. Model context uses a rolling summary plus uncompacted recent messages; compaction never deletes raw history.
 
-The Gemini/Claude path remains temporary only so each intermediate merge is runnable. The next Wave 1 PR replaces both model providers and the summarizer with the OpenAI Responses API.
+OpenAI's Responses API is the only model-provider path. The default model is configurable with `OPENAI_MODEL`; the flight build defaults to `gpt-5.6-terra`. Current/news/flight/search commands require hosted web search, while normal conversation exposes web search for the model to use when needed. Conversation compaction and local PDF summarization do not enable web search.
 
-See [`docs/FLIGHT_BUILD_PLAN.md`](docs/FLIGHT_BUILD_PLAN.md) for the delivery gates.
+```text
+Telegram
+   ↓
+FastAPI webhook adapter
+   ↓
+Conversation service
+   ↓
+SQLite raw history
+   ├── rolling compacted summary
+   └── uncompacted recent messages
+   ↓
+OpenAI Responses API
+   ├── hosted web search when needed
+   ├── direct weather helper
+   └── local PDF extraction
+   ↓
+Telegram reply
+```
+
+See [`docs/FLIGHT_BUILD_PLAN.md`](docs/FLIGHT_BUILD_PLAN.md) for the remaining qualification gates.
 
 ## Quick start
 
@@ -47,73 +66,52 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 For the flight build, run a single Uvicorn worker. Conversation serialization currently uses an in-process per-conversation lock; multi-worker deployment is intentionally deferred.
 
-## Required configuration during the temporary-provider stage
+## Required configuration
 
 ```text
 TELEGRAM_TOKEN
 TELEGRAM_ALLOWED_USER_ID
 WEBHOOK_BASE_URL
 WEBHOOK_SECRET_TOKEN
-ANTHROPIC_API_KEY        # temporary; removed at OpenAI cutover
-GEMINI_API_KEY           # temporary; removed at OpenAI cutover
+OPENAI_API_KEY
 ```
 
-Conversation defaults are configurable with `DATABASE_PATH`, `RECENT_CONTEXT_ITEMS`, `COMPACT_AFTER_ITEMS`, and `MAX_SUMMARY_CHARS`.
-
-## Architecture
-
-Current path:
+Useful optional overrides:
 
 ```text
-Telegram
-   ↓
-FastAPI webhook adapter
-   ↓
-Conversation service
-   ↓
-SQLite raw history
-   ├── rolling compacted summary
-   └── uncompacted recent messages
-   ↓
-Temporary Gemini/Claude agent
-   ↓
-Telegram reply
+OPENAI_MODEL=gpt-5.6-terra
+OPENAI_REASONING_EFFORT=low
+OPENAI_TIMEOUT_SECONDS=45
+OPENAI_MAX_OUTPUT_TOKENS=1800
+WEB_SEARCH_CONTEXT_SIZE=medium
+DATABASE_PATH=data/telegram-llm.sqlite3
+RECENT_CONTEXT_ITEMS=12
+COMPACT_AFTER_ITEMS=24
+MAX_SUMMARY_CHARS=4000
+MAX_RESPONSE_CHARS=3500
+PDF_MAX_CHARS=60000
 ```
 
-Next Wave 1 target:
+## Security and reliability boundaries
 
-```text
-Telegram
-   ↓
-FastAPI webhook adapter
-   ↓
-Conversation service
-   ↓
-SQLite raw history + rolling compacted context
-   ↓
-OpenAI Responses API
-   ↓
-Telegram reply
-```
-
-## Security boundaries
-
-- single authorized Telegram user ID
+- one authorized Telegram user ID
 - Telegram webhook secret validation
-- secrets loaded from environment / `.env`, not source control
-- bounded model/tool iterations
+- OpenAI and Telegram secrets loaded from environment / `.env`, not source control
+- Responses API calls use `store=false`; SQLite is the conversation source of truth
+- raw history survives compaction and restart
+- same-conversation processing is serialized in the single-worker runtime
 - standalone Pi deployment first; no cross-repository runtime dependency required for flight readiness
 
 ## Tests
 
-The repository includes credential-free contract, persistence, restart, and compaction tests:
+The repository includes credential-free contracts for scope, webhook protection, SQLite persistence, restart behavior, compaction, OpenAI Responses request shape, and PDF extraction:
 
 ```bash
 python -m compileall -q .
 PYTHONWARNINGS='error::ResourceWarning' python -m unittest discover -s tests -v
 ```
 
-Live provider and end-to-end Telegram qualification are separate gates because they require runtime credentials and public webhook connectivity.
+Live OpenAI, public webhook, Telegram delivery, restart, and long-conversation qualification are separate runtime gates.
 
 ## License
 

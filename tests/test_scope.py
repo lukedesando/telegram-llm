@@ -20,7 +20,7 @@ class FlightScopeTests(unittest.TestCase):
                     break
         self.assertEqual(command_keys, {"weather", "flight", "news", "search", "pdf"})
 
-    def test_grok_and_deferred_tools_are_not_in_agent(self):
+    def test_deferred_tools_are_not_in_agent(self):
         source = (ROOT / "agent.py").read_text(encoding="utf-8").lower()
         for forbidden in (
             "grok",
@@ -33,10 +33,22 @@ class FlightScopeTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source)
 
-    def test_config_does_not_require_removed_provider_keys(self):
-        source = (ROOT / "config.py").read_text(encoding="utf-8").lower()
-        self.assertNotIn("xai_api_key", source)
-        self.assertNotIn("google_cse", source)
+    def test_openai_is_the_only_model_provider(self):
+        agent_source = (ROOT / "agent.py").read_text(encoding="utf-8").lower()
+        config_source = (ROOT / "config.py").read_text(encoding="utf-8").lower()
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
+
+        self.assertIn("openaiprovider", agent_source)
+        self.assertIn("openai_api_key", config_source)
+        self.assertIn("openai", requirements)
+
+        for forbidden in ("anthropic", "gemini", "google-genai", "xai_api_key", "claude"):
+            self.assertNotIn(forbidden, agent_source)
+            self.assertNotIn(forbidden, config_source)
+            self.assertNotIn(forbidden, requirements)
+
+    def test_removed_provider_fetch_tool_is_absent(self):
+        self.assertFalse((ROOT / "tools" / "fetch.py").exists())
 
 
 if __name__ == "__main__":
