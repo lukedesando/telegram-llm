@@ -41,6 +41,38 @@ class ConversationServiceTests(unittest.TestCase):
         )
         self.assertEqual(seen[1][2], "")
 
+    def test_uncompacted_context_is_not_truncated_before_threshold(self):
+        async def fake_agent(text, history, summary):
+            return f"reply:{text}", "fake", []
+
+        async def fake_summarizer(prior, messages):
+            return "summary"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            service = ConversationService(
+                fake_agent,
+                {},
+                store,
+                fake_summarizer,
+                recent_context_items=2,
+                compact_after_items=6,
+            )
+            asyncio.run(service.respond("telegram:1", "one"))
+            asyncio.run(service.respond("telegram:1", "two"))
+            summary, context = service.context("telegram:1")
+
+        self.assertEqual(summary, "")
+        self.assertEqual(
+            context,
+            [
+                ("user", "one"),
+                ("assistant", "reply:one"),
+                ("user", "two"),
+                ("assistant", "reply:two"),
+            ],
+        )
+
     def test_compaction_preserves_raw_history_and_supplies_summary(self):
         seen = []
         summaries = []
