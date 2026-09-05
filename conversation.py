@@ -62,12 +62,13 @@ class ConversationService:
 
     def context(self, conversation_id: str) -> tuple[str, list[tuple[str, str]]]:
         summary, through_id = self._store.state(conversation_id)
-        recent = self._store.recent_messages(
-            conversation_id,
-            through_id,
-            self._recent_context_items,
-        )
-        return summary, [(m.role, m.content) for m in recent]
+        pending = self._store.messages_after(conversation_id, through_id)
+        if len(pending) <= self._compact_after_items:
+            selected = pending
+        else:
+            # A failed/overdue compaction must not make model context unbounded.
+            selected = pending[-self._recent_context_items :]
+        return summary, [(m.role, m.content) for m in selected]
 
     async def respond(self, conversation_id: str, text: str) -> ConversationReply:
         async with self._lock(conversation_id):
