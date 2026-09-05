@@ -1,42 +1,24 @@
 import httpx
 import pymupdf
 
-SCHEMA = {
-    "name": "fetch_pdf",
-    "description": (
-        "Download and extract text from a PDF at a URL. "
-        "Use for academic papers, policy documents, reports, constitutions, etc. "
-        "Returns raw text for you to summarize."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "Direct URL to the PDF file"}
-        },
-        "required": ["url"],
-    },
-}
-
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; inflightbot/1.0)"}
+_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; telegram-llm/1.0)"}
 
 
-async def fetch_pdf(url: str, max_chars: int = 3000) -> str:
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(url, headers=_HEADERS)
-        resp.raise_for_status()
-
-    doc = pymupdf.open(stream=resp.content, filetype="pdf")
-    pages_text = []
-    total = 0
-    for page in doc:
-        text = page.get_text()
-        pages_text.append(text)
-        total += len(text)
-        if total >= max_chars:
-            break
-    doc.close()
-
-    return "\n".join(pages_text)[:max_chars]
+def extract_pdf_text(pdf_bytes: bytes, max_chars: int = 60000) -> str:
+    """Extract bounded text from PDF bytes."""
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        pages_text = []
+        total = 0
+        for page in doc:
+            text = page.get_text()
+            pages_text.append(text)
+            total += len(text)
+            if total >= max_chars:
+                break
+        return "\n".join(pages_text)[:max_chars]
+    finally:
+        doc.close()
 
 
 async def fetch_pdf_bytes(url: str) -> tuple[bytes, str]:
@@ -44,21 +26,31 @@ async def fetch_pdf_bytes(url: str) -> tuple[bytes, str]:
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         resp = await client.get(url, headers=_HEADERS)
         resp.raise_for_status()
-    filename = url.rstrip("/").rsplit("/", 1)[-1]
-    if not filename.endswith(".pdf"):
+    filename = url.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0] or "document.pdf"
+    if not filename.lower().endswith(".pdf"):
         filename += ".pdf"
     return resp.content, filename
+
+
+async def fetch_pdf(url: str, max_chars: int = 60000) -> str:
+    pdf_bytes, _ = await fetch_pdf_bytes(url)
+    return extract_pdf_text(pdf_bytes, max_chars=max_chars)
+
+
+async def fetch_pdf_document(url: str, max_chars: int = 60000) -> tuple[bytes, str, str]:
+    """Download once and return raw bytes, filename, and extracted bounded text."""
+    pdf_bytes, filename = await fetch_pdf_bytes(url)
+    return pdf_bytes, filename, extract_pdf_text(pdf_bytes, max_chars=max_chars)
 
 
 def text_to_pdf(text: str, title: str = "") -> bytes:
     """Generate a simple PDF from plain text."""
     doc = pymupdf.open()
-    width, height = 595, 842  # A4
+    width, height = 595, 842
     margin = 50
     font_size = 11
     line_height = font_size * 1.4
     usable_w = width - 2 * margin
-    usable_h = height - 2 * margin
 
     lines = []
     for paragraph in text.split("\n"):
