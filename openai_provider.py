@@ -73,7 +73,7 @@ class OpenAIProvider:
                 }
             ]
             if web_search == "required":
-                request["tool_choice"] = {"type": "web_search"}
+                request["tool_choice"] = "required"
 
         response = await self.client.responses.create(**request)
         text = (getattr(response, "output_text", "") or "").strip()
