@@ -47,6 +47,7 @@ class OpenAIProvider:
         web_search: WebSearchMode = "auto",
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
+        max_chars: int | None = None,
     ) -> str:
         input_items = [
             {"role": role, "content": text}
@@ -78,10 +79,11 @@ class OpenAIProvider:
         text = (getattr(response, "output_text", "") or "").strip()
         if not text:
             raise RuntimeError("OpenAI returned no text output")
-        return self._truncate(text)
+        return self._truncate(text, max_chars or self.max_response_chars)
 
-    def _truncate(self, text: str) -> str:
-        if len(text) <= self.max_response_chars:
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        if len(text) <= limit:
             return text
-        shortened = text[: self.max_response_chars].rsplit(" ", 1)[0]
-        return (shortened or text[: self.max_response_chars - 1]) + "…"
+        shortened = text[:limit].rsplit(" ", 1)[0]
+        return (shortened or text[: limit - 1]) + "…"
