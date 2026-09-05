@@ -34,13 +34,16 @@ def _needs_fetch(message: str, history: list) -> bool:
     return any(hint in combined for hint in _FETCH_HINTS)
 
 
-def _system_prompt() -> str:
+def _system_prompt(context_summary: str = "") -> str:
     today = date.today().strftime("%B %d, %Y")
-    return f"""You are a concise assistant used through Telegram.
+    prompt = f"""You are a concise assistant used through Telegram.
 Today's date is {today}.
 The user may be on constrained inflight Wi-Fi, so answer directly and keep responses compact.
 Use web search for current factual questions. For direct URLs, fetch the source before summarizing it. For PDFs, fetch and read the PDF rather than relying on search snippets.
 Keep normal responses under {settings.max_response_chars} characters unless the request requires more detail."""
+    if context_summary.strip():
+        prompt += f"\n\nEarlier conversation summary:\n{context_summary.strip()}"
+    return prompt
 
 
 _gemini = genai.Client(api_key=settings.gemini_api_key)
@@ -49,7 +52,11 @@ _gemini_tools = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
 _claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
-async def _run_gemini(user_message: str, history: list) -> tuple[str, str]:
+async def _run_gemini(
+    user_message: str,
+    history: list,
+    context_summary: str = "",
+) -> tuple[str, str]:
     contents = []
     for role, text in history:
         contents.append(
@@ -62,7 +69,7 @@ async def _run_gemini(user_message: str, history: list) -> tuple[str, str]:
 
     config = gtypes.GenerateContentConfig(
         tools=_gemini_tools,
-        system_instruction=_system_prompt(),
+        system_instruction=_system_prompt(context_summary),
         max_output_tokens=512,
     )
 
@@ -87,7 +94,11 @@ async def _run_gemini(user_message: str, history: list) -> tuple[str, str]:
     raise RuntimeError(f"All Gemini models failed: {last_error}")
 
 
-async def _run_claude(user_message: str, history: list) -> tuple[str, str]:
+async def _run_claude(
+    user_message: str,
+    history: list,
+    context_summary: str = "",
+) -> tuple[str, str]:
     messages = [{"role": role, "content": text} for role, text in history]
     messages.append({"role": "user", "content": user_message})
     tools = [
@@ -100,7 +111,7 @@ async def _run_claude(user_message: str, history: list) -> tuple[str, str]:
         response = await _claude.messages.create(
             model=settings.claude_model,
             max_tokens=768,
-            system=_system_prompt(),
+            system=_system_prompt(context_summary),
             tools=tools,
             messages=messages,
         )
@@ -149,6 +160,57 @@ def _truncate(text: str) -> str:
         return text
     shortened = text[: settings.max_response_chars].rsplit(" ", 1)[0]
     return (shortened or text[: settings.max_response_chars - 1]) + "…"
+
+
+async def summarize_history(
+    prior_summary: str,
+    messages: list[tuple[str, str]],
+) -> str:
+    transcript = "\n".join(f"{role}: {text}" for role, text in messages)
+    prompt = (
+        "Update a compact memory of this conversation. Preserve concrete facts, user preferences, "
+        "decisions, names, numbers, unresolved questions, and active tasks. Remove repetition and chatter. "
+        "Do not invent information. Return only the updated memory.\n\n"
+        f"Previous memory:\n{prior_summary or '(none)'}\n\n"
+        f"New messages:\n{transcript}"
+    )
+
+    last_error = None
+    for model in _gemini_models:
+        try:
+            response = await _gemini.aio.models.generate_content(
+                model=model,
+                contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=prompt)])],
+                config=gtypes.GenerateContentConfig(max_output_tokens=1024),
+            )
+            text = " ".join(
+                part.text
+                for part in response.candidates[0].content.parts
+                if getattr(part, "text", None)
+            ).strip()
+            if text:
+                return text[: settings.max_summary_chars]
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Gemini summarizer failed on %s: %s", model, str(exc)[:80])
+
+    try:
+        response = await _claude.messages.create(
+            model=settings.claude_model,
+            max_tokens=1024,
+            system="Maintain a compact, factual conversation memory. Return only the memory text.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = " ".join(
+            block.text for block in response.content if hasattr(block, "text")
+        ).strip()
+        if text:
+            return text[: settings.max_summary_chars]
+    except Exception as exc:
+        last_error = exc
+        logger.warning("Claude summarizer failed: %s", str(exc)[:80])
+
+    raise RuntimeError(f"Conversation summarization failed: {last_error}")
 
 
 async def cmd_weather(args: str) -> str:
@@ -220,16 +282,20 @@ COMMANDS = {
 }
 
 
-async def run_agent(user_message: str, history: list | None = None) -> tuple[str, str, list]:
+async def run_agent(
+    user_message: str,
+    history: list | None = None,
+    context_summary: str = "",
+) -> tuple[str, str, list]:
     history = history or []
     if _needs_fetch(user_message, history):
-        text, model = await _run_claude(user_message, history)
+        text, model = await _run_claude(user_message, history, context_summary)
         return text, model, []
 
     try:
-        text, model = await _run_gemini(user_message, history)
+        text, model = await _run_gemini(user_message, history, context_summary)
         return text, model, []
     except Exception as exc:
         logger.warning("Gemini failed, falling back to Claude: %s", str(exc)[:80])
-        text, model = await _run_claude(user_message, history)
+        text, model = await _run_claude(user_message, history, context_summary)
         return text, model, []

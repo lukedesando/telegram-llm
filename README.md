@@ -21,9 +21,9 @@ Explicitly deferred until after flight qualification: Grok/xAI, image search, st
 
 ## Current migration state
 
-Wave 0 keeps the upstream Gemini/Claude path temporarily so each merge remains runnable. Wave 1 will replace both with the OpenAI Responses API rather than landing an intermediate broken revision.
+The Telegram adapter now uses a transport-neutral conversation service backed by SQLite. Raw user/assistant messages remain durable across process restarts. Model context uses a rolling summary plus uncompacted recent messages; compaction never deletes raw history.
 
-The current conversation store is still the upstream 12-turn in-memory buffer. SQLite persistence and rolling context compaction are Wave 1 work and are not yet complete.
+The Gemini/Claude path remains temporary only so each intermediate merge is runnable. The next Wave 1 PR replaces both model providers and the summarizer with the OpenAI Responses API.
 
 See [`docs/FLIGHT_BUILD_PLAN.md`](docs/FLIGHT_BUILD_PLAN.md) for the delivery gates.
 
@@ -45,38 +45,42 @@ Telegram requires a public HTTPS webhook URL. Set `WEBHOOK_BASE_URL` to that end
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-## Required configuration during Wave 0
+For the flight build, run a single Uvicorn worker. Conversation serialization currently uses an in-process per-conversation lock; multi-worker deployment is intentionally deferred.
+
+## Required configuration during the temporary-provider stage
 
 ```text
 TELEGRAM_TOKEN
 TELEGRAM_ALLOWED_USER_ID
 WEBHOOK_BASE_URL
 WEBHOOK_SECRET_TOKEN
-ANTHROPIC_API_KEY        # temporary; removed in Wave 1
-GEMINI_API_KEY           # temporary; removed in Wave 1
+ANTHROPIC_API_KEY        # temporary; removed at OpenAI cutover
+GEMINI_API_KEY           # temporary; removed at OpenAI cutover
 ```
 
-`CLAUDE_MODEL`, `GEMINI_MODELS`, `MAX_RESPONSE_CHARS`, and `MAX_TOOL_ITERATIONS` have defaults.
+Conversation defaults are configurable with `DATABASE_PATH`, `RECENT_CONTEXT_ITEMS`, `COMPACT_AFTER_ITEMS`, and `MAX_SUMMARY_CHARS`.
 
 ## Architecture
 
-Current Wave 0 path:
+Current path:
 
 ```text
 Telegram
    ↓
-FastAPI /webhook
+FastAPI webhook adapter
    ↓
-Telegram handlers
+Conversation service
    ↓
-12-turn in-memory history
+SQLite raw history
+   ├── rolling compacted summary
+   └── uncompacted recent messages
    ↓
 Temporary Gemini/Claude agent
    ↓
 Telegram reply
 ```
 
-Target Wave 1 path:
+Next Wave 1 target:
 
 ```text
 Telegram
@@ -102,14 +106,14 @@ Telegram reply
 
 ## Tests
 
-Wave 0 includes lightweight repository-contract tests that do not require live provider credentials:
+The repository includes credential-free contract, persistence, restart, and compaction tests:
 
 ```bash
 python -m compileall -q .
-python -m unittest discover -s tests -v
+PYTHONWARNINGS='error::ResourceWarning' python -m unittest discover -s tests -v
 ```
 
-Behavioral provider, persistence, restart, and end-to-end Telegram tests are added in later waves as those boundaries are introduced.
+Live provider and end-to-end Telegram qualification are separate gates because they require runtime credentials and public webhook connectivity.
 
 ## License
 
