@@ -1,5 +1,4 @@
-anthropic
-google-genai
+openai
 python-telegram-bot==22.7
 fastapi==0.115.12
 uvicorn[standard]==0.34.3
