@@ -1,50 +1,14 @@
 import logging
-import re
-from datetime import date, datetime
-import httpx
+from datetime import date
+
 import anthropic
 from google import genai
 from google.genai import types as gtypes
 
 from config import settings
-
-# ── Daily cost tracking ─────────────────────────────────────────────────────
-
-_cost_today: float = 0.0
-_cost_date: str = ""
-_cost_calls: int = 0
-
-
-def _track_cost(input_tokens: int, output_tokens: int, model: str = "claude") -> None:
-    global _cost_today, _cost_date, _cost_calls
-    today = date.today().isoformat()
-    if _cost_date != today:
-        _cost_today = 0.0
-        _cost_calls = 0
-        _cost_date = today
-    # Claude Sonnet 4: $3/M input, $15/M output
-    # Grok: ~$3/M input, $15/M output (similar)
-    if "claude" in model:
-        cost = (input_tokens * 3 + output_tokens * 15) / 1_000_000
-    elif "grok" in model:
-        cost = (input_tokens * 3 + output_tokens * 15) / 1_000_000
-    else:
-        cost = 0.0
-    _cost_today += cost
-    _cost_calls += 1
-
-
-def get_daily_cost() -> str:
-    today = date.today().isoformat()
-    if _cost_date != today:
-        return f"Today ({today}): $0.00 — 0 API calls. Gemini calls are free."
-    return f"Today ({_cost_date}): ${_cost_today:.4f} — {_cost_calls} paid API calls. Gemini calls are free."
-from tools.fetch import fetch_url, SCHEMA as FETCH_SCHEMA
-from tools.pdf import fetch_pdf, fetch_pdf_bytes, SCHEMA as PDF_SCHEMA
+from tools.fetch import SCHEMA as FETCH_SCHEMA, fetch_url
+from tools.pdf import SCHEMA as PDF_SCHEMA, fetch_pdf, fetch_pdf_bytes
 from tools.weather import get_weather
-from tools.grok import grokipedia
-from tools.stocks import get_stock
-from tools.images import search_image
 
 logger = logging.getLogger(__name__)
 
@@ -54,400 +18,161 @@ TOOL_DISPATCH = {
 }
 
 _FETCH_HINTS = (
-    "http://", "https://", ".ro", ".com", ".org", ".net", ".io",
-    "hotnews", "g4media", "digi24", "protv", "antena", "realitatea",
-    "site", "page", "article", "link", "url",
+    "http://",
+    "https://",
+    ".pdf",
+    "site",
+    "page",
+    "article",
+    "link",
+    "url",
 )
 
 
 def _needs_fetch(message: str, history: list) -> bool:
-    """Route to Claude if current message OR any recent history references specific sites."""
-    combined = message.lower() + " ".join(t for _, t in history).lower()
+    combined = message.lower() + " " + " ".join(text for _, text in history).lower()
     return any(hint in combined for hint in _FETCH_HINTS)
 
 
 def _system_prompt() -> str:
     today = date.today().strftime("%B %d, %Y")
-    return f"""You are a concise assistant on Telegram.
-Today's date is {today}. Use this when interpreting "this year", "today", "recently", etc.
-Small screen, limited WiFi. Every character counts.
+    return f"""You are a concise assistant used through Telegram.
+Today's date is {today}.
+The user may be on constrained inflight Wi-Fi, so answer directly and keep responses compact.
+Use web search for current factual questions. For direct URLs, fetch the source before summarizing it. For PDFs, fetch and read the PDF rather than relying on search snippets.
+Keep normal responses under {settings.max_response_chars} characters unless the request requires more detail."""
 
-TOOL RULES:
-- PDF requests: use web_search to find the direct PDF URL, then call fetch_pdf. Never summarize from snippets alone.
-- Direct .pdf URLs: call fetch_pdf immediately.
-- All other questions: use web_search.
-
-OUTPUT RULES:
-- Max {settings.max_response_chars} characters. Plain text only. No markdown, no bullets, no asterisks.
-- No preamble. Answer directly.
-- PDF: 3-5 key points separated by " | ".
-- Score: "Barcelona 2 - Real Madrid 1. Final."
-- Never apologize or explain your process.
-- Image requests are handled separately. Never say you cannot show images."""
-
-
-# ── Gemini (primary — free, google_search server-side) ───────────────────────
 
 _gemini = genai.Client(api_key=settings.gemini_api_key)
-_gemini_models = [m.strip() for m in settings.gemini_models.split(",")]
+_gemini_models = [m.strip() for m in settings.gemini_models.split(",") if m.strip()]
+_gemini_tools = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
+_claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
-GEMINI_TOOLS = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
 
-
-async def _run_gemini(user_message: str, history: list, preferred_model: str = None) -> tuple[str, str]:
-    system = _system_prompt() + "\n\nNote: no PDF fetching — for PDF requests summarize from search results as best you can."
+async def _run_gemini(user_message: str, history: list) -> tuple[str, str]:
     contents = []
     for role, text in history:
-        g_role = "model" if role == "assistant" else "user"
-        contents.append(gtypes.Content(role=g_role, parts=[gtypes.Part(text=text)]))
+        contents.append(
+            gtypes.Content(
+                role="model" if role == "assistant" else "user",
+                parts=[gtypes.Part(text=text)],
+            )
+        )
     contents.append(gtypes.Content(role="user", parts=[gtypes.Part(text=user_message)]))
 
     config = gtypes.GenerateContentConfig(
-        tools=GEMINI_TOOLS,
-        system_instruction=system,
+        tools=_gemini_tools,
+        system_instruction=_system_prompt(),
         max_output_tokens=512,
     )
-    # If a model is locked for this conversation, try it first
-    model_order = _gemini_models
-    if preferred_model and preferred_model in _gemini_models:
-        model_order = [preferred_model] + [m for m in _gemini_models if m != preferred_model]
 
-    response = None
-    used_model = None
-    for model in model_order:
+    last_error = None
+    for model in _gemini_models:
         try:
             response = await _gemini.aio.models.generate_content(
-                model=model, contents=contents, config=config
+                model=model,
+                contents=contents,
+                config=config,
             )
-            used_model = model
-            logger.info("Gemini model=%s", model)
-            break
-        except Exception as e:
-            if any(c in str(e) for c in ("429", "400", "401", "403", "404")):
-                logger.warning("Gemini %s on %s", str(e)[:10], model)
-                continue
-            raise
+            text_parts = [
+                part.text
+                for part in response.candidates[0].content.parts
+                if getattr(part, "text", None)
+            ]
+            return _truncate(" ".join(text_parts).strip() or "No answer found."), model
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Gemini failed on %s: %s", model, str(exc)[:80])
 
-    if response is None:
-        raise Exception("429 All Gemini models exhausted")
-
-    text_parts = [p.text for p in response.candidates[0].content.parts if getattr(p, "text", None)]
-    text = " ".join(text_parts).strip()
-    if len(text) > settings.max_response_chars:
-        text = text[: settings.max_response_chars].rsplit(" ", 1)[0] + "…"
-    return text or "No answer found.", used_model
-
-
-# ── Claude (fallback — paid, web_search + fetch_pdf + fetch_url) ──────────────
-
-_claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-
-CLAUDE_TOOLS = [
-    {"type": "web_search_20250305", "name": "web_search"},
-    FETCH_SCHEMA,
-    PDF_SCHEMA,
-]
+    raise RuntimeError(f"All Gemini models failed: {last_error}")
 
 
 async def _run_claude(user_message: str, history: list) -> tuple[str, str]:
-    system = _system_prompt()
     messages = [{"role": role, "content": text} for role, text in history]
     messages.append({"role": "user", "content": user_message})
+    tools = [
+        {"type": "web_search_20250305", "name": "web_search"},
+        FETCH_SCHEMA,
+        PDF_SCHEMA,
+    ]
 
     for iteration in range(settings.max_tool_iterations):
         response = await _claude.messages.create(
             model=settings.claude_model,
-            max_tokens=512,
-            system=system,
-            tools=CLAUDE_TOOLS,
+            max_tokens=768,
+            system=_system_prompt(),
+            tools=tools,
             messages=messages,
         )
         logger.info("Claude stop_reason=%s iter=%d", response.stop_reason, iteration)
 
         if response.stop_reason == "end_turn":
-            _track_cost(response.usage.input_tokens, response.usage.output_tokens, "claude")
-            text = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
-            if len(text) > settings.max_response_chars:
-                text = text[: settings.max_response_chars].rsplit(" ", 1)[0] + "…"
-            return text or "No answer found.", "claude"
+            text = " ".join(
+                block.text for block in response.content if hasattr(block, "text")
+            ).strip()
+            return _truncate(text or "No answer found."), "claude"
 
-        if response.stop_reason == "tool_use":
-            messages.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-                tool_fn = TOOL_DISPATCH.get(block.name)
-                if tool_fn is None:
-                    continue
-                try:
-                    result = await tool_fn(block.input)
-                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(result)})
-                except Exception as exc:
-                    logger.warning("Tool %s failed: %s", block.name, exc)
-                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": f"Error: {exc}", "is_error": True})
-            if tool_results:
-                messages.append({"role": "user", "content": tool_results})
-            continue
+        if response.stop_reason != "tool_use":
+            break
 
-        break
+        messages.append({"role": "assistant", "content": response.content})
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            tool_fn = TOOL_DISPATCH.get(block.name)
+            if tool_fn is None:
+                continue
+            try:
+                result = await tool_fn(block.input)
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": str(result)}
+                )
+            except Exception as exc:
+                logger.warning("Tool %s failed: %s", block.name, exc)
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Error: {exc}",
+                        "is_error": True,
+                    }
+                )
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
 
     return "Could not complete that request.", "claude"
 
 
-# ── Grok (xAI — free-form via /grok command) ────────────────────────────────
+def _truncate(text: str) -> str:
+    if len(text) <= settings.max_response_chars:
+        return text
+    shortened = text[: settings.max_response_chars].rsplit(" ", 1)[0]
+    return (shortened or text[: settings.max_response_chars - 1]) + "…"
 
-async def _run_grok(user_message: str, history: list) -> str:
-    system = _system_prompt()
-    messages = [{"role": "assistant" if r == "assistant" else "user", "content": t} for r, t in history]
-    messages.append({"role": "user", "content": user_message})
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings.xai_api_key}"},
-            json={"model": "grok-4.3", "messages": [{"role": "system", "content": system}] + messages, "max_tokens": 512},
-        )
-        resp.raise_for_status()
-    data = resp.json()
-    text = data["choices"][0]["message"]["content"].strip()
-    usage = data.get("usage", {})
-    _track_cost(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), "grok")
-    if len(text) > settings.max_response_chars:
-        text = text[:settings.max_response_chars].rsplit(" ", 1)[0] + "…"
-    return text
-
-
-# ── Image helpers ────────────────────────────────────────────────────────────
-
-# Positive: "get me an image of", "show picture of", "image of X"
-# Negative: exclude complaints like "didn't get image", "no image", "can't see image"
-_IMAGE_POSITIVE = re.compile(
-    r"(?:get|find|show|send|fetch|give|need|want|see)\s+(?:me\s+)?(?:an?\s+|the\s+)?(?:image|photo|picture|pic|img)"
-    r"|(?:image|photo|picture|pic)\s+(?:of|for)\s+",
-    re.IGNORECASE,
-)
-_IMAGE_NEGATIVE = re.compile(
-    r"(?:didn.t|did\s+not|don.t|no|can.t|cannot|not)\s+(?:get|see|show|have|find|receive)\s+(?:an?\s+|the\s+)?(?:image|photo|picture)",
-    re.IGNORECASE,
-)
-
-
-def _wants_image(message: str) -> bool:
-    if _IMAGE_NEGATIVE.search(message):
-        return False
-    return bool(_IMAGE_POSITIVE.search(message))
-
-
-def _extract_image_topic(message: str, history: list) -> str:
-    """Extract the actual image topic — handle vague requests like 'image of those'."""
-    # Strip the image-request preamble to get the topic
-    topic = re.sub(
-        r"^(?:ok\.?\s*)?(?:get|find|show|send|fetch|give|need|want|see)\s+(?:me\s+)?(?:an?\s+|the\s+)?(?:image|photo|picture|pic|img)\s*(?:of|for)?\s*",
-        "", message, flags=re.IGNORECASE,
-    ).strip()
-
-    # If topic is vague/empty ("those", "it", "them", "that", "all"), pull from history
-    if not topic or topic.lower() in ("those", "it", "them", "that", "all", "all of them", "all 8", "all eight"):
-        # Find last substantive assistant message
-        for role, text in reversed(history):
-            if role == "assistant" and len(text) > 20:
-                # Extract first noun phrase / topic — use first sentence or caption
-                first_line = text.split("\n")[0].split(".")[0].strip()
-                if first_line:
-                    topic = first_line[:100]
-                    break
-        # Also check user messages for the original topic
-        if not topic or topic.lower().startswith(("i ", "ok", "the ")):
-            for role, text in reversed(history):
-                if role == "user" and not _wants_image(text):
-                    topic = text.strip()[:100]
-                    break
-
-    return topic or message
-
-
-_IMAGE_URL_RE = re.compile(r"https?://\S+\.(?:jpg|jpeg|png|gif|webp)", re.IGNORECASE)
-_WIKI_UA = "inflightbot/1.0 (hermes; contact@eloquentix.com)"
-
-
-async def _find_image(topic: str) -> dict | None:
-    """Find image: Google CSE (if configured) → Wikipedia → Claude web_search."""
-    # Strategy 1: Google CSE (if keys configured)
-    att = await search_image(topic)
-    if att:
-        return att
-
-    # Strategy 2: Wikipedia — reliable for known topics
-    raw = topic.strip()
-    slugs = list(dict.fromkeys([
-        raw.replace(" ", "_"),
-        raw.title().replace(" ", "_"),
-        raw.lower().replace(" ", "_"),
-    ]))
-    for wiki_slug in slugs:
-        wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{wiki_slug}"
-        try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                resp = await client.get(wiki_url, headers={"User-Agent": _WIKI_UA})
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                img_url = data.get("originalimage", {}).get("source") or data.get("thumbnail", {}).get("source")
-                if not img_url:
-                    continue
-                img_resp = await client.get(img_url, headers={"User-Agent": _WIKI_UA})
-                if img_resp.status_code == 200 and "image" in img_resp.headers.get("content-type", ""):
-                    ext = "jpg"
-                    for e in ("png", "webp", "gif", "jpeg"):
-                        if e in img_resp.headers.get("content-type", ""):
-                            ext = e
-                            break
-                    logger.info("Image found via Wikipedia for '%s'", topic)
-                    return {"type": "photo", "data": img_resp.content, "filename": f"image.{ext}", "caption": topic}
-        except Exception as exc:
-            logger.debug("Wikipedia image failed: %s", exc)
-
-    # Strategy 3: Claude web_search
-    try:
-        response = await _claude.messages.create(
-            model=settings.claude_model, max_tokens=300,
-            system="Find direct image URLs (.jpg/.png/.webp) for the query. Return ONLY URLs, one per line.",
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": f"Find 3 direct image URLs for: {topic}"}],
-        )
-        all_text = " ".join(b.text for b in response.content if hasattr(b, "text"))
-        urls = _IMAGE_URL_RE.findall(all_text)
-        urls = [u for u in urls if "/thumb/" not in u] or urls
-    except Exception as exc:
-        logger.warning("Claude image search failed: %s", exc)
-        urls = []
-
-    for url in urls[:5]:
-        try:
-            ua = _WIKI_UA if "wikimedia" in url or "wikipedia" in url else "Mozilla/5.0"
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                resp = await client.get(url, headers={"User-Agent": ua})
-                resp.raise_for_status()
-                ct = resp.headers.get("content-type", "")
-                if "image" not in ct or len(resp.content) < 1000:
-                    continue
-                ext = "jpg"
-                for e in ("png", "webp", "gif", "jpeg"):
-                    if e in ct:
-                        ext = e
-                        break
-                logger.info("Image downloaded from %s", url[:80])
-                return {"type": "photo", "data": resp.content, "filename": f"image.{ext}", "caption": topic}
-        except Exception:
-            continue
-
-    logger.warning("All image strategies failed for '%s'", topic)
-    return None
-
-
-# ── Slash command handlers ────────────────────────────────────────────────────
 
 async def cmd_weather(args: str) -> str:
-    city = args.strip() or "Bucharest"
+    city = args.strip() or "current location"
     try:
         return await get_weather(city)
     except Exception as exc:
         return f"Weather unavailable: {exc}"
 
 
-async def cmd_wiki(args: str) -> str:
-    if not args.strip():
-        return "Usage: /wiki <topic>"
-    try:
-        return await grokipedia(args.strip(), settings.max_response_chars)
-    except Exception as exc:
-        return f"Grok unavailable: {exc}"
-
-
 async def cmd_flight(args: str) -> str:
     if not args.strip():
-        return "Usage: /flight <number>  e.g. /flight LH441"
-    prompt = f"Current status of flight {args.strip().upper()}. One line: flight number, status, departure airport+time, arrival airport+time, any delay."
+        return "Usage: /flight <number>"
+    prompt = (
+        f"Current status of flight {args.strip().upper()}. "
+        "Give flight number, status, departure airport/time, arrival airport/time, and delay."
+    )
     answer, _ = await _run_gemini(prompt, [])
     return answer
 
 
 async def cmd_news(args: str) -> str:
     topic = args.strip() or "world"
-    prompt = f"Top 5 news headlines about {topic} right now. One line each, no numbers, separated by ' | '."
-    answer, _ = await _run_claude(prompt, [])
-    return answer
-
-
-async def cmd_pdf(args: str) -> tuple[str, list]:
-    if not args.strip():
-        return "Usage: /pdf <url or document name>", []
-    url = args.strip()
-    attachments = []
-    # If it's a direct PDF URL, also send the file
-    if url.lower().startswith("http") and ".pdf" in url.lower():
-        try:
-            pdf_bytes, filename = await fetch_pdf_bytes(url)
-            if len(pdf_bytes) < 50 * 1024 * 1024:  # under 50MB Telegram limit
-                attachments.append({"type": "document", "data": pdf_bytes, "filename": filename})
-        except Exception as exc:
-            logger.warning("PDF download for attachment failed: %s", exc)
-    prompt = f"Fetch and summarize this PDF: {url}"
-    answer, _ = await _run_claude(prompt, [])
-    return answer, attachments
-
-
-async def cmd_image(args: str) -> tuple[str, list]:
-    if not args.strip():
-        return "Usage: /image <what you want>", []
-    att = await _find_image(args.strip())
-    if att:
-        return "", [att]
-    return f"Couldn't find an image for: {args.strip()}", []
-
-
-async def cmd_tr(args: str) -> str:
-    parts = args.strip().split(" ", 1)
-    if len(parts) < 2:
-        return "Usage: /tr <language> <text>  e.g. /tr french Good morning"
-    lang, text = parts[0], parts[1]
-    prompt = f"Translate to {lang}: {text}. Reply with only the translation."
-    answer, _ = await _run_gemini(prompt, [])
-    return answer
-
-
-async def cmd_stocks(args: str) -> str:
-    if not args.strip():
-        return "Usage: /stocks <ticker>  e.g. /stocks AAPL"
-    tickers = args.strip().split()
-    results = []
-    for ticker in tickers[:4]:  # max 4 at once
-        try:
-            results.append(get_stock(ticker))
-        except Exception as exc:
-            results.append(f"{ticker.upper()}: error ({exc})")
-    return "\n".join(results)
-
-
-async def cmd_search(args: str) -> str:
-    if not args.strip():
-        return "Usage: /search <query>"
-    prompt = (
-        f"Search the web for: {args.strip()}\n"
-        "Return the most relevant result. Include: title, URL, and a 2-3 sentence summary. "
-        "Plain text, no markdown."
-    )
-    answer, _ = await _run_claude(prompt, [])
-    return answer
-
-
-async def cmd_sports(args: str) -> str:
-    if not args.strip():
-        return "Usage: /sports <topic>  e.g. /sports world cup"
-    prompt = (
-        f"Latest results and scores for: {args.strip()}. "
-        "Include scores, dates, upcoming matches if relevant. Plain text, concise."
-    )
+    prompt = f"Top current news about {topic}. Give the most important items concisely."
     try:
         answer, _ = await _run_gemini(prompt, [])
     except Exception:
@@ -455,97 +180,56 @@ async def cmd_sports(args: str) -> str:
     return answer
 
 
-async def cmd_retrieve(args: str) -> tuple[str, list]:
+async def cmd_search(args: str) -> str:
     if not args.strip():
-        return "Usage: /retrieve <work>  e.g. /retrieve shakespeare sonnet 43", []
-    prompt = (
-        f"Retrieve the full text of: {args.strip()}. "
-        "Return the complete original text — do not summarize or truncate. "
-        "Include title and author at the top. Plain text, no markdown."
-    )
-    response = await _claude.messages.create(
-        model=settings.claude_model, max_tokens=4096,
-        system="You retrieve and reproduce full texts of literary works. Return complete text, never summarize.",
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        messages=[{"role": "user", "content": prompt}],
-    )
-    _track_cost(response.usage.input_tokens, response.usage.output_tokens, "claude")
-    text = " ".join(b.text for b in response.content if hasattr(b, "text")).strip()
-    attachments = _maybe_pdf(text, args.strip())
-    return text, attachments
-
-
-def _maybe_pdf(text: str, title: str) -> list:
-    """If text exceeds comfortable Telegram reading length, also send as PDF."""
-    if len(text) <= 1500:
-        return []
+        return "Usage: /search <query>"
+    prompt = f"Search the web for: {args.strip()}. Answer directly with the most relevant current information."
     try:
-        from tools.pdf import text_to_pdf
-        pdf_bytes = text_to_pdf(text, title)
-        filename = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")[:40] + ".pdf"
-        return [{"type": "document", "data": pdf_bytes, "filename": filename}]
-    except Exception as exc:
-        logger.warning("PDF generation failed: %s", exc)
-        return []
+        answer, _ = await _run_gemini(prompt, [])
+    except Exception:
+        answer, _ = await _run_claude(prompt, [])
+    return answer
 
 
-async def cmd_cost(args: str) -> str:
-    return get_daily_cost()
+async def cmd_pdf(args: str) -> tuple[str, list]:
+    if not args.strip():
+        return "Usage: /pdf <url>", []
+
+    url = args.strip()
+    attachments = []
+    if url.lower().startswith("http") and ".pdf" in url.lower():
+        try:
+            pdf_bytes, filename = await fetch_pdf_bytes(url)
+            if len(pdf_bytes) < 50 * 1024 * 1024:
+                attachments.append(
+                    {"type": "document", "data": pdf_bytes, "filename": filename}
+                )
+        except Exception as exc:
+            logger.warning("PDF attachment download failed: %s", exc)
+
+    answer, _ = await _run_claude(f"Fetch and summarize this PDF: {url}", [])
+    return answer, attachments
 
 
 COMMANDS = {
-    "weather":  cmd_weather,
-    "wiki":     cmd_wiki,
-    "flight":   cmd_flight,
-    "news":     cmd_news,
-    "pdf":      cmd_pdf,
-    "image":    cmd_image,
-    "tr":       cmd_tr,
-    "stocks":   cmd_stocks,
-    "search":   cmd_search,
-    "sports":   cmd_sports,
-    "retrieve": cmd_retrieve,
-    "cost":     cmd_cost,
+    "weather": cmd_weather,
+    "flight": cmd_flight,
+    "news": cmd_news,
+    "search": cmd_search,
+    "pdf": cmd_pdf,
 }
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
-
-async def run_agent(user_message: str, history: list = None, preferred_model: str = None) -> tuple[str, str, list]:
+async def run_agent(user_message: str, history: list | None = None) -> tuple[str, str, list]:
     history = history or []
-
-    # Auto-detect image requests in free-form messages
-    if _wants_image(user_message):
-        topic = _extract_image_topic(user_message, history)
-        logger.info("Image request detected, topic='%s'", topic)
-        att = await _find_image(topic)
-        attachments = [att] if att else []
-        # Still get a text answer too
-        try:
-            answer, model = await _run_gemini(user_message, history, preferred_model)
-        except Exception:
-            answer, model = await _run_claude(user_message, history)
-        return answer, model, attachments
-
-    # Explicit model routing
-    if preferred_model == "claude":
-        logger.info("Routing to Claude (user choice)")
-        text, model = await _run_claude(user_message, history)
-        return text, model, []
-
-    if preferred_model == "grok":
-        logger.info("Routing to Grok (user choice)")
-        text = await _run_grok(user_message, history)
-        return text, "grok", []
-
     if _needs_fetch(user_message, history):
-        logger.info("Routing to Claude (fetch needed)")
         text, model = await _run_claude(user_message, history)
         return text, model, []
+
     try:
-        text, model = await _run_gemini(user_message, history, preferred_model)
+        text, model = await _run_gemini(user_message, history)
         return text, model, []
     except Exception as exc:
-        logger.warning("Gemini failed (%s), falling back to Claude", str(exc)[:60])
+        logger.warning("Gemini failed, falling back to Claude: %s", str(exc)[:80])
         text, model = await _run_claude(user_message, history)
         return text, model, []
