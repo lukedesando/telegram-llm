@@ -1,23 +1,20 @@
 import io
 import logging
-from collections import deque
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from agent import COMMANDS, run_agent
 from config import settings
+from conversation import ConversationReply, ConversationService
 
 logger = logging.getLogger(__name__)
 
-_history: dict[int, deque] = {}
-MAX_HISTORY = 12
+conversation_service = ConversationService(run_agent, COMMANDS)
 
 
-def _get_history(chat_id: int) -> deque:
-    if chat_id not in _history:
-        _history[chat_id] = deque(maxlen=MAX_HISTORY)
-    return _history[chat_id]
+def _conversation_id(update: Update) -> str:
+    return f"telegram:{update.effective_chat.id}"
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -31,25 +28,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     chat_id = update.effective_chat.id
-    history = _get_history(chat_id)
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     logger.info("USER: %s", text)
     try:
-        answer, used_model, attachments = await run_agent(text, list(history))
+        reply = await conversation_service.respond(_conversation_id(update), text)
     except Exception as exc:
         logger.exception("Agent error")
-        answer = f"Error: {str(exc)[:120]}"
-        used_model = None
-        attachments = []
+        reply = ConversationReply(f"Error: {str(exc)[:120]}")
 
-    logger.info("BOT [%s]: %s", used_model, answer)
-    history.append(("user", text))
-    history.append(("assistant", answer))
+    logger.info("BOT [%s]: %s", reply.model, reply.text)
+    await _send_reply(update, reply)
 
-    if answer:
-        await update.message.reply_text(answer)
-    await _send_attachments(update, attachments)
+
+async def _send_reply(update: Update, reply: ConversationReply) -> None:
+    if reply.text:
+        await update.message.reply_text(reply.text)
+    await _send_attachments(update, reply.attachments)
 
 
 async def _send_attachments(update: Update, attachments: list) -> None:
@@ -70,7 +65,7 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user = update.effective_user
     if user is None or user.id != settings.telegram_allowed_user_id:
         return
-    _history.pop(update.effective_chat.id, None)
+    conversation_service.clear(_conversation_id(update))
     await update.message.reply_text("Context cleared.")
 
 
@@ -83,29 +78,22 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     parts = text.lstrip("/").split(" ", 1)
     cmd = parts[0].lower()
     args = parts[1] if len(parts) > 1 else ""
-    fn = COMMANDS.get(cmd)
-    if not fn:
-        return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
-        result = await fn(args)
-        if isinstance(result, tuple):
-            answer, attachments = result
-        else:
-            answer, attachments = result, []
+        reply = await conversation_service.run_command(
+            _conversation_id(update),
+            text,
+            cmd,
+            args,
+        )
+        if reply is None:
+            return
     except Exception as exc:
         logger.exception("Command error")
-        answer = f"Error: {str(exc)[:120]}"
-        attachments = []
+        reply = ConversationReply(f"Error: {str(exc)[:120]}")
 
-    chat_id = update.effective_chat.id
-    history = _get_history(chat_id)
-    history.append(("user", text))
-    if answer:
-        history.append(("assistant", answer))
-        await update.message.reply_text(answer)
-    await _send_attachments(update, attachments)
+    await _send_reply(update, reply)
 
 
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
