@@ -83,7 +83,12 @@ class OpenAIProvider:
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
+        if limit < 1:
+            raise ValueError("limit must be positive")
         if len(text) <= limit:
             return text
-        shortened = text[:limit].rsplit(" ", 1)[0]
-        return (shortened or text[: limit - 1]) + "…"
+        if limit == 1:
+            return "…"
+        body_limit = limit - 1
+        shortened = text[:body_limit].rsplit(" ", 1)[0]
+        return (shortened or text[:body_limit]) + "…"
