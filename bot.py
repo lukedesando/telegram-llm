@@ -4,13 +4,22 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from agent import COMMANDS, run_agent
+from agent import COMMANDS, run_agent, summarize_history
 from config import settings
 from conversation import ConversationReply, ConversationService
+from storage import SQLiteConversationStore
 
 logger = logging.getLogger(__name__)
 
-conversation_service = ConversationService(run_agent, COMMANDS)
+conversation_store = SQLiteConversationStore(settings.database_path)
+conversation_service = ConversationService(
+    run_agent,
+    COMMANDS,
+    conversation_store,
+    summarize_history,
+    recent_context_items=settings.recent_context_items,
+    compact_after_items=settings.compact_after_items,
+)
 
 
 def _conversation_id(update: Update) -> str:
