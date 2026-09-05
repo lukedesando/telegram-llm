@@ -12,11 +12,13 @@ class Settings(BaseSettings):
     webhook_base_url: str
     webhook_secret_token: str
 
-    # Temporary upstream providers. Wave 1 replaces these with OpenAI.
-    anthropic_api_key: str
-    claude_model: str = "claude-sonnet-4-6"
-    gemini_api_key: str
-    gemini_models: str = "gemini-2.5-flash-lite,gemini-2.5-flash"
+    # OpenAI
+    openai_api_key: str
+    openai_model: str = "gpt-5.6-terra"
+    openai_reasoning_effort: str = "low"
+    openai_timeout_seconds: float = 45.0
+    openai_max_output_tokens: int = 1800
+    web_search_context_size: str = "medium"
 
     # Conversation storage/context
     database_path: str = "data/telegram-llm.sqlite3"
@@ -25,8 +27,8 @@ class Settings(BaseSettings):
     max_summary_chars: int = 4000
 
     # Behavior
-    max_response_chars: int = 280
-    max_tool_iterations: int = 5
+    max_response_chars: int = 3500
+    pdf_max_chars: int = 60000
 
 
 settings = Settings()
