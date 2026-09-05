@@ -83,7 +83,7 @@ class OpenAIProviderTests(unittest.TestCase):
         )
 
         request = client.responses.calls[0]
-        self.assertEqual(request["tool_choice"], {"type": "web_search"})
+        self.assertEqual(request["tool_choice"], "required")
         self.assertEqual(request["tools"][0]["type"], "web_search")
 
     def test_search_off_omits_tools_and_allows_summary_overrides(self):
