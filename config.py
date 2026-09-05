@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_models: str = "gemini-2.5-flash-lite,gemini-2.5-flash"
 
+    # Conversation storage/context
+    database_path: str = "data/telegram-llm.sqlite3"
+    recent_context_items: int = 12
+    compact_after_items: int = 24
+    max_summary_chars: int = 4000
+
     # Behavior
     max_response_chars: int = 280
     max_tool_iterations: int = 5
