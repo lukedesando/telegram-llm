@@ -1,17 +1,16 @@
 import io
 import logging
 from collections import deque
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+
+from agent import COMMANDS, run_agent
 from config import settings
-from agent import run_agent, COMMANDS, _maybe_pdf
 
 logger = logging.getLogger(__name__)
 
-# In-memory state per chat
 _history: dict[int, deque] = {}
-_model: dict[int, str] = {}   # locked model for each conversation
 MAX_HISTORY = 12
 
 
@@ -33,28 +32,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     chat_id = update.effective_chat.id
     history = _get_history(chat_id)
-
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    locked_model = _model.get(chat_id)
     logger.info("USER: %s", text)
     try:
-        answer, used_model, attachments = await run_agent(text, list(history), locked_model)
-        if chat_id not in _model and used_model:
-            _model[chat_id] = used_model
-            logger.info("Locked conversation %d to model: %s", chat_id, used_model)
+        answer, used_model, attachments = await run_agent(text, list(history))
     except Exception as exc:
         logger.exception("Agent error")
         answer = f"Error: {str(exc)[:120]}"
         used_model = None
         attachments = []
-    logger.info("BOT [%s]: %s", used_model, answer)
 
+    logger.info("BOT [%s]: %s", used_model, answer)
     history.append(("user", text))
     history.append(("assistant", answer))
-
-    # Auto-PDF for long responses
-    attachments.extend(_maybe_pdf(answer, text[:60]))
 
     if answer:
         await update.message.reply_text(answer)
@@ -64,39 +55,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def _send_attachments(update: Update, attachments: list) -> None:
     for att in attachments:
         try:
-            if att["type"] == "photo":
-                caption = att.get("caption")
-                if "data" in att:
-                    photo = io.BytesIO(att["data"])
-                    photo.name = att.get("filename", "image.jpg")
-                    await update.message.reply_photo(photo, caption=caption)
-                else:
-                    await update.message.reply_photo(att["url"], caption=caption)
-            elif att["type"] == "document":
+            if att["type"] == "document":
                 doc = io.BytesIO(att["data"])
                 doc.name = att.get("filename", "file")
-                await update.message.reply_document(doc, filename=att.get("filename", "file"))
+                await update.message.reply_document(
+                    doc,
+                    filename=att.get("filename", "file"),
+                )
         except Exception as exc:
             logger.warning("Failed to send attachment: %s", exc)
-
-
-async def handle_model_switch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if user is None or user.id != settings.telegram_allowed_user_id:
-        return
-    cmd = (update.message.text or "").lstrip("/").split()[0].lower()
-    chat_id = update.effective_chat.id
-    _model[chat_id] = cmd
-    await update.message.reply_text(f"Next prompts use {cmd}.")
 
 
 async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is None or user.id != settings.telegram_allowed_user_id:
         return
-    chat_id = update.effective_chat.id
-    _history.pop(chat_id, None)
-    _model.pop(chat_id, None)
+    _history.pop(update.effective_chat.id, None)
     await update.message.reply_text("Context cleared.")
 
 
@@ -104,6 +78,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user
     if user is None or user.id != settings.telegram_allowed_user_id:
         return
+
     text = update.message.text or ""
     parts = text.lstrip("/").split(" ", 1)
     cmd = parts[0].lower()
@@ -111,11 +86,10 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     fn = COMMANDS.get(cmd)
     if not fn:
         return
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    logger.info("CMD /%s %s", cmd, args)
     try:
         result = await fn(args)
-        # Commands can return str or (str, attachments)
         if isinstance(result, tuple):
             answer, attachments = result
         else:
@@ -124,16 +98,13 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Command error")
         answer = f"Error: {str(exc)[:120]}"
         attachments = []
-    logger.info("BOT [/%s]: %s", cmd, answer)
-    # Feed command into conversation history for follow-up context
+
     chat_id = update.effective_chat.id
     history = _get_history(chat_id)
     history.append(("user", text))
     if answer:
         history.append(("assistant", answer))
         await update.message.reply_text(answer)
-    elif attachments:
-        history.append(("assistant", f"[Sent image: {args}]"))
     await _send_attachments(update, attachments)
 
 
@@ -143,35 +114,19 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     await update.message.reply_text(
         "/weather <city> — current weather\n"
-        "/flight <LH441> — live flight status\n"
-        "/news [topic] — top headlines\n"
-        "/search <query> — web search (top result)\n"
-        "/sports <topic> — scores and results\n"
-        "/retrieve <work> — full text (poems, etc.)\n"
-        "/pdf <url or name> — fetch, summarize + send PDF\n"
-        "/image <topic> — find and send an image\n"
-        "/wiki <topic> — Grokipedia summary via Grok\n"
-        "/stocks <AAPL TSLA ...> — live stock quotes\n"
-        "/tr <lang> <text> — translate\n"
-        "/claude /gemini /grok — switch AI model\n"
-        "/cost — today's API spend\n"
+        "/flight <UA123> — live flight status\n"
+        "/news [topic] — current headlines\n"
+        "/search <query> — web search\n"
+        "/pdf <url> — fetch and summarize a PDF\n"
         "/clear — reset conversation\n"
         "/help — this list"
     )
 
 
 def build_application() -> Application:
-    from telegram.ext import CommandHandler
-    app = (
-        Application.builder()
-        .token(settings.telegram_token)
-        .updater(None)
-        .build()
-    )
+    app = Application.builder().token(settings.telegram_token).updater(None).build()
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(CommandHandler("help", handle_help))
-    for model_cmd in ("claude", "gemini", "grok"):
-        app.add_handler(CommandHandler(model_cmd, handle_model_switch))
     for cmd in COMMANDS:
         app.add_handler(CommandHandler(cmd, handle_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
