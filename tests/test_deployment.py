@@ -49,7 +49,9 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('[[ "$BRANCH" == "main" ]]', source)
         self.assertIn('git status --porcelain --untracked-files=normal', source)
         self.assertIn('git archive "$EXPECTED_SHA"', source)
-        self.assertIn('systemd-analyze verify "$RELEASE_DIR/deploy/systemd/telegram-llm.service"', source)
+        self.assertIn('VERIFY_UNIT="$(mktemp /run/telegram-llm-verify.', source)
+        self.assertIn('s#/opt/telegram-llm/current#$RELEASE_DIR#g', source)
+        self.assertIn('systemd-analyze verify "$VERIFY_UNIT"', source)
 
     def test_activation_requires_secret_file_metadata_and_exact_health(self):
         source = (DEPLOY / "install_pi.sh").read_text(encoding="utf-8")
@@ -57,13 +59,17 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('TCP port $PORT is already in use before first activation', source)
         self.assertIn('value.get("revision") != expected', source)
         self.assertIn('value.get("storage") != "ok"', source)
+        self.assertIn('systemd-analyze verify "$UNIT_DEST"', source)
         self.assertNotIn("set -x", source)
 
-    def test_rollback_can_only_select_installed_marked_release(self):
+    def test_rollback_can_recover_when_current_path_is_broken(self):
         source = (DEPLOY / "rollback_pi.sh").read_text(encoding="utf-8")
         self.assertIn('TARGET_RELEASE="$APP_ROOT/releases/$TARGET_SHA"', source)
         self.assertIn('.source-revision', source)
-        self.assertIn('systemd-analyze verify "$TARGET_RELEASE/deploy/systemd/telegram-llm.service"', source)
+        verify_pos = source.index('systemd-analyze verify "$VERIFY_UNIT"')
+        switch_pos = source.index('NEXT_LINK="$APP_ROOT/.rollback-')
+        self.assertLess(verify_pos, switch_pos)
+        self.assertIn('s#/opt/telegram-llm/current#$TARGET_RELEASE#g', source)
         self.assertIn('value.get("revision") != expected', source)
 
     def test_local_qualification_checks_exact_runtime_identity(self):
