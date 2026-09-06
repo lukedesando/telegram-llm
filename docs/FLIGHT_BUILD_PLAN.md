@@ -43,10 +43,12 @@ Credential-free source qualification passed before each merge. Live Telegram -> 
    - prepare-only path cannot change the active release/unit
    - activation requires a clean exact `main` SHA and an existing secret environment file
    - systemd unit runs as `luke`, one worker, bound only to `127.0.0.1:8787`
-   - startup preflight validates required secrets/configuration without printing secret values
-   - rollback selects only an already-installed exact release
+   - startup preflight validates required secrets/configuration without printing secret values and rejects SQLite-path overrides
+   - rollback selects only an already-installed exact release and can validate it even if `current` is broken
    - non-mutating local Pi qualification binds runtime evidence to the expected SHA
-   - deployment delta tests: 9/9 passing after prepare/rollback systemd-verification repair
+   - deployment scripts are executable in the Git tree
+   - deployment delta tests: 10/10 passing
+   - exact systemd unit syntax/directives passed `systemd-analyze verify` in a host-like validation sandbox; activation repeats verification on `pi-guy`
 3. Activate the exact release behind a selected public HTTPS webhook route. — pending
 4. Qualify live OpenAI responses and Telegram delivery. — pending
 5. Run service-restart, long-conversation/compaction, PDF, search, reset, and end-to-end acceptance on the exact deployed revision. — pending
