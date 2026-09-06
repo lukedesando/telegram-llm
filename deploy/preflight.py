@@ -31,10 +31,14 @@ def validate_environment(env: dict[str, str]) -> list[str]:
     parsed = urlparse(base_url)
     if parsed.scheme != "https" or not parsed.hostname:
         errors.append("WEBHOOK_BASE_URL must be an absolute HTTPS URL")
+    if parsed.username or parsed.password:
+        errors.append("WEBHOOK_BASE_URL must not embed credentials")
+    if parsed.query or parsed.fragment:
+        errors.append("WEBHOOK_BASE_URL must not contain a query or fragment")
     if base_url.endswith("/"):
         errors.append("WEBHOOK_BASE_URL must not end with a slash")
 
-    revision = env.get("APP_REVISION", "").strip().lower()
+    revision = env.get("APP_REVISION", "").strip()
     if not _SHA_RE.fullmatch(revision):
         errors.append("APP_REVISION must be a full 40-character lowercase Git SHA")
 
