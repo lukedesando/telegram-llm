@@ -61,7 +61,7 @@ cp .env.example .env
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 Telegram requires a public HTTPS webhook URL. Set `WEBHOOK_BASE_URL` to that endpoint and create a webhook secret with:
@@ -71,6 +71,21 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
 For the flight build, run a single Uvicorn worker. Conversation serialization currently uses an in-process per-conversation lock; multi-worker deployment is intentionally deferred.
+
+## Standalone Pi deployment
+
+The repository includes an exact-revision standalone deployment package for `pi-guy`:
+
+- `deploy/systemd/telegram-llm.service` — single-worker service bound only to `127.0.0.1:8787`;
+- `deploy/preflight.py` — secret-safe startup validation;
+- `deploy/install_pi.sh` — immutable release preparation and activation;
+- `deploy/rollback_pi.sh` — rollback to an already-installed exact revision;
+- `deploy/qualify_pi.sh` — non-mutating local runtime qualification;
+- `deploy/telegram-llm.env.example` — secret environment field template.
+
+Preparation can be completed without credentials and cannot change the active release. Activation requires the secret environment file and an already-selected public HTTPS ingress. The repository deliberately does not choose or configure that ingress mechanism.
+
+Full commands, security boundaries, rollback, and live Telegram/OpenAI acceptance are in [`docs/PI_DEPLOYMENT.md`](docs/PI_DEPLOYMENT.md).
 
 ## Required configuration
 
@@ -99,23 +114,25 @@ MAX_RESPONSE_CHARS=3500
 PDF_MAX_CHARS=60000
 ```
 
-Production deployment should set `APP_REVISION` to the exact deployed Git commit. `/health` and `/status` expose that value so qualification can prove which source revision is running.
+Production deployment sets `APP_REVISION` from the exact selected release rather than the secret file. `/health` and `/status` expose that value so qualification can prove which source revision is running.
 
 ## Security and reliability boundaries
 
 - one authorized Telegram user ID
 - Telegram webhook secret validation
 - OpenAI and Telegram secrets loaded from environment / `.env`, not source control
+- OpenAI SDK is pinned for deployment reproducibility
 - Responses API calls use `store=false`; SQLite is the conversation source of truth
 - raw history survives compaction and restart
 - completed Telegram update IDs survive restart for duplicate suppression
 - `/health` returns 503 when the SQLite store is unavailable
+- standalone service binds only to loopback; public HTTPS termination is separate
 - same-conversation processing is serialized in the single-worker runtime
 - standalone Pi deployment first; no cross-repository runtime dependency required for flight readiness
 
 ## Tests
 
-The repository includes credential-free contracts for scope, webhook protection, SQLite persistence, restart behavior, compaction, Telegram update leases/deduplication, OpenAI Responses request shape, and PDF extraction:
+The repository includes credential-free contracts for scope, webhook protection, SQLite persistence, restart behavior, compaction, Telegram update leases/deduplication, OpenAI Responses request shape, PDF extraction, and standalone deployment invariants:
 
 ```bash
 python -m compileall -q .
