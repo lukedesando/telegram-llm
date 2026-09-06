@@ -19,7 +19,7 @@ fail() {
 TARGET_SHA="$1"
 [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "target revision must be a full lowercase Git SHA"
 
-for command in systemctl systemd-analyze curl python3 install; do
+for command in systemctl systemd-analyze curl python3 install sed; do
     command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"
 done
 
@@ -30,7 +30,17 @@ TARGET_RELEASE="$APP_ROOT/releases/$TARGET_SHA"
 [[ -x "$TARGET_RELEASE/.venv/bin/python" ]] || fail "target release lacks virtual environment"
 [[ ! -e "$CURRENT_LINK" || -L "$CURRENT_LINK" ]] || fail "current path exists and is not a symlink"
 
-systemd-analyze verify "$TARGET_RELEASE/deploy/systemd/telegram-llm.service"
+VERIFY_UNIT="$(mktemp /run/telegram-llm-rollback-verify.XXXXXX.service)"
+cleanup_verify() {
+    rm -f -- "$VERIFY_UNIT"
+}
+trap cleanup_verify EXIT
+sed "s#/opt/telegram-llm/current#$TARGET_RELEASE#g" \
+    "$TARGET_RELEASE/deploy/systemd/telegram-llm.service" > "$VERIFY_UNIT"
+systemd-analyze verify "$VERIFY_UNIT"
+rm -f -- "$VERIFY_UNIT"
+trap - EXIT
+
 NEXT_LINK="$APP_ROOT/.rollback-$TARGET_SHA-$$"
 ln -s -- "$TARGET_RELEASE" "$NEXT_LINK"
 mv -Tf -- "$NEXT_LINK" "$CURRENT_LINK"
