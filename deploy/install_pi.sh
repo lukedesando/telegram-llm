@@ -51,7 +51,6 @@ getent passwd "$SERVICE_USER" >/dev/null || fail "service user does not exist: $
 getent group "$SERVICE_GROUP" >/dev/null || fail "service group does not exist: $SERVICE_GROUP"
 
 install -d -m 0755 "$APP_ROOT" "$RELEASE_ROOT"
-install -d -m 0750 -o root -g "$SERVICE_GROUP" "$CONFIG_DIR"
 
 RELEASE_DIR="$RELEASE_ROOT/$EXPECTED_SHA"
 if [[ -e "$RELEASE_DIR" ]]; then
@@ -79,6 +78,27 @@ else
     trap - EXIT
 fi
 
+systemd-analyze verify "$RELEASE_DIR/deploy/systemd/telegram-llm.service"
+printf 'PREPARED_REVISION=%s\n' "$EXPECTED_SHA"
+printf 'PREPARED_RELEASE=%s\n' "$RELEASE_DIR"
+
+if [[ "$MODE" == "prepare" ]]; then
+    printf 'DEPLOYMENT_STATE=PREPARED_INACTIVE\n'
+    exit 0
+fi
+
+install -d -m 0750 -o root -g "$SERVICE_GROUP" "$CONFIG_DIR"
+[[ -f "$SECRET_ENV" && ! -L "$SECRET_ENV" ]] || fail "secret environment file must exist as a regular file: $SECRET_ENV"
+SECRET_META="$(stat -c '%U:%G:%a' "$SECRET_ENV")"
+[[ "$SECRET_META" == "root:$SERVICE_GROUP:640" ]] || fail "secret environment file must be owned root:$SERVICE_GROUP with mode 0640"
+
+if ! systemctl is-active --quiet "$SERVICE"; then
+    command -v ss >/dev/null 2>&1 || fail "required command missing for first activation: ss"
+    if ss -H -ltn | awk '{print $4}' | grep -Eq ":${PORT}$"; then
+        fail "TCP port $PORT is already in use before first activation"
+    fi
+fi
+
 [[ ! -e "$CURRENT_LINK" || -L "$CURRENT_LINK" ]] || fail "current path exists and is not a symlink"
 NEXT_LINK="$APP_ROOT/.current-$EXPECTED_SHA-$$"
 ln -s -- "$RELEASE_DIR" "$NEXT_LINK"
@@ -91,30 +111,11 @@ chmod 0644 "$REVISION_ENV"
 install -m 0644 "$RELEASE_DIR/deploy/systemd/telegram-llm.service" "$UNIT_DEST"
 systemd-analyze verify "$UNIT_DEST"
 systemctl daemon-reload
-
-printf 'PREPARED_REVISION=%s\n' "$EXPECTED_SHA"
-printf 'CURRENT_RELEASE=%s\n' "$(readlink -f "$CURRENT_LINK")"
-
-if [[ "$MODE" == "prepare" ]]; then
-    printf 'DEPLOYMENT_STATE=PREPARED_INACTIVE\n'
-    exit 0
-fi
-
-[[ -f "$SECRET_ENV" && ! -L "$SECRET_ENV" ]] || fail "secret environment file must exist as a regular file: $SECRET_ENV"
-SECRET_META="$(stat -c '%U:%G:%a' "$SECRET_ENV")"
-[[ "$SECRET_META" == "root:$SERVICE_GROUP:640" ]] || fail "secret environment file must be owned root:$SERVICE_GROUP with mode 0640"
-
-if ! systemctl is-active --quiet "$SERVICE"; then
-    command -v ss >/dev/null 2>&1 || fail "required command missing for first activation: ss"
-    if ss -H -ltn | awk '{print $4}' | grep -Eq ":${PORT}$"; then
-        fail "TCP port $PORT is already in use before first activation"
-    fi
-fi
-
 systemctl enable "$SERVICE"
 systemctl restart "$SERVICE"
 
-for _ in $(seq 1 30); do
+attempt=1
+while (( attempt <= 30 )); do
     HEALTH_JSON="$(curl --fail --silent --show-error --max-time 3 "$HEALTH_URL" 2>/dev/null || true)"
     if [[ -n "$HEALTH_JSON" ]] && python3 - "$EXPECTED_SHA" "$HEALTH_JSON" <<'PY'
 import json
@@ -133,9 +134,11 @@ PY
         printf 'DEPLOYMENT_STATE=ACTIVE\n'
         printf 'HEALTH=PASS\n'
         printf 'REVISION=%s\n' "$EXPECTED_SHA"
+        printf 'CURRENT_RELEASE=%s\n' "$(readlink -f "$CURRENT_LINK")"
         exit 0
     fi
     sleep 1
+    ((attempt += 1))
 done
 
 systemctl status "$SERVICE" --no-pager >&2 || true
