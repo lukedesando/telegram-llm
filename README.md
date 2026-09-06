@@ -14,6 +14,8 @@ The pre-flight build intentionally supports only:
 - `/weather <city>` — direct weather lookup
 - `/flight <UA123>` — current flight status
 - `/pdf <url>` — download, locally extract, summarize, and return a PDF
+- `/status` — local relay/storage/revision status without an OpenAI call
+- `/new` — start over using the established context-reset behavior
 - `/clear` — reset the current conversation
 - `/help` — command list
 
@@ -25,10 +27,14 @@ The Telegram adapter uses a transport-neutral conversation service backed by SQL
 
 OpenAI's Responses API is the only model-provider path. The default model is configurable with `OPENAI_MODEL`; the flight build defaults to `gpt-5.6-terra`. Current/news/flight/search commands require hosted web search, while normal conversation exposes web search for the model to use when needed. Conversation compaction and local PDF summarization do not enable web search.
 
+Telegram update IDs are persisted in SQLite. Completed updates are suppressed across process restarts; in-flight updates use a five-minute processing lease so an abandoned update can be retried rather than remaining permanently wedged. A failed/cancelled handler releases its lease immediately. This is duplicate suppression, not a transactional outbound-message queue: a process crash after Telegram accepts a reply but before completion is recorded can still produce a duplicate after lease expiry.
+
 ```text
 Telegram
    ↓
 FastAPI webhook adapter
+   ↓
+persistent update lease / duplicate suppression
    ↓
 Conversation service
    ↓
@@ -88,9 +94,12 @@ DATABASE_PATH=data/telegram-llm.sqlite3
 RECENT_CONTEXT_ITEMS=12
 COMPACT_AFTER_ITEMS=24
 MAX_SUMMARY_CHARS=4000
+APP_REVISION=unknown
 MAX_RESPONSE_CHARS=3500
 PDF_MAX_CHARS=60000
 ```
+
+Production deployment should set `APP_REVISION` to the exact deployed Git commit. `/health` and `/status` expose that value so qualification can prove which source revision is running.
 
 ## Security and reliability boundaries
 
@@ -99,19 +108,21 @@ PDF_MAX_CHARS=60000
 - OpenAI and Telegram secrets loaded from environment / `.env`, not source control
 - Responses API calls use `store=false`; SQLite is the conversation source of truth
 - raw history survives compaction and restart
+- completed Telegram update IDs survive restart for duplicate suppression
+- `/health` returns 503 when the SQLite store is unavailable
 - same-conversation processing is serialized in the single-worker runtime
 - standalone Pi deployment first; no cross-repository runtime dependency required for flight readiness
 
 ## Tests
 
-The repository includes credential-free contracts for scope, webhook protection, SQLite persistence, restart behavior, compaction, OpenAI Responses request shape, and PDF extraction:
+The repository includes credential-free contracts for scope, webhook protection, SQLite persistence, restart behavior, compaction, Telegram update leases/deduplication, OpenAI Responses request shape, and PDF extraction:
 
 ```bash
 python -m compileall -q .
 PYTHONWARNINGS='error::ResourceWarning' python -m unittest discover -s tests -v
 ```
 
-Live OpenAI, public webhook, Telegram delivery, restart, and long-conversation qualification are separate runtime gates.
+Live OpenAI, public webhook, Telegram delivery, Pi service restart, and long-conversation qualification remain separate runtime gates.
 
 ## License
 

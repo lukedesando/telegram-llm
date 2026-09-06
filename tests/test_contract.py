@@ -25,6 +25,18 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("webhook_secret_token", source)
         self.assertIn("status_code=403", source)
 
+    def test_health_checks_storage_and_can_fail_degraded(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn("conversation_store.ping()", source)
+        self.assertIn("status_code=200 if storage_ok else 503", source)
+        self.assertIn("settings.app_revision", source)
+
+    def test_operator_commands_are_registered(self):
+        source = (ROOT / "bot.py").read_text(encoding="utf-8")
+        self.assertIn('CommandHandler("new", handle_new)', source)
+        self.assertIn('CommandHandler("status", handle_status)', source)
+        self.assertIn("UpdateDeduplicator", source)
+
 
 if __name__ == "__main__":
     unittest.main()

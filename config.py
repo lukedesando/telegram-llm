@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     compact_after_items: int = 24
     max_summary_chars: int = 4000
 
-    # Behavior
+    # Deployment/behavior
+    app_revision: str = "unknown"
     max_response_chars: int = 3500
     pdf_max_chars: int = 60000
 

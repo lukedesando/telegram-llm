@@ -2,9 +2,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from telegram import Update
 
-from bot import build_application
+from bot import build_application, conversation_store
 from config import settings
 
 logging.basicConfig(level=logging.INFO)
@@ -48,4 +49,12 @@ async def telegram_webhook(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    storage_ok = conversation_store.ping()
+    return JSONResponse(
+        status_code=200 if storage_ok else 503,
+        content={
+            "status": "ok" if storage_ok else "degraded",
+            "storage": "ok" if storage_ok else "error",
+            "revision": settings.app_revision,
+        },
+    )
