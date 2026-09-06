@@ -34,7 +34,7 @@ if [[ $# -eq 2 ]]; then
 fi
 [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected revision must be a full lowercase Git SHA"
 
-for command in git python3 tar install systemctl systemd-analyze curl stat getent sed cp rm mv ln readlink mktemp awk grep ss journalctl sleep; do
+for command in git python3 tar install systemctl systemd-analyze curl stat getent sed cp rm mv ln readlink mktemp awk grep ss journalctl sleep cmp; do
     command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"
 done
 
@@ -117,13 +117,19 @@ elif [[ -e "$CURRENT_LINK" ]]; then
 fi
 
 PREVIOUS_UNIT_BACKUP=""
+PREVIOUS_REVISION_BACKUP=""
+cleanup_backups() {
+    [[ -z "$PREVIOUS_UNIT_BACKUP" ]] || rm -f -- "$PREVIOUS_UNIT_BACKUP"
+    [[ -z "$PREVIOUS_REVISION_BACKUP" ]] || rm -f -- "$PREVIOUS_REVISION_BACKUP"
+}
+trap cleanup_backups EXIT
+
 if [[ -e "$UNIT_DEST" ]]; then
     [[ -f "$UNIT_DEST" && ! -L "$UNIT_DEST" ]] || fail "installed unit path is not a regular file"
     PREVIOUS_UNIT_BACKUP="$(mktemp /run/telegram-llm-unit-before.XXXXXX)"
     cp -p -- "$UNIT_DEST" "$PREVIOUS_UNIT_BACKUP"
 fi
 
-PREVIOUS_REVISION_BACKUP=""
 if [[ -e "$REVISION_ENV" ]]; then
     [[ -f "$REVISION_ENV" && ! -L "$REVISION_ENV" ]] || fail "revision environment path is not a regular file"
     PREVIOUS_REVISION_BACKUP="$(mktemp /run/telegram-llm-revision-before.XXXXXX)"
@@ -149,53 +155,110 @@ if [[ "$PREVIOUS_ACTIVE" != true ]]; then
 fi
 
 TRANSACTION_ACTIVE=false
-cleanup_backups() {
-    [[ -z "$PREVIOUS_UNIT_BACKUP" ]] || rm -f -- "$PREVIOUS_UNIT_BACKUP"
-    [[ -z "$PREVIOUS_REVISION_BACKUP" ]] || rm -f -- "$PREVIOUS_REVISION_BACKUP"
-}
 restore_previous_activation() {
     local original_status="$1"
+    local rollback_ok=true
     trap - EXIT
     set +e
     printf 'ACTIVATION_ROLLBACK=START\n' >&2
 
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    if [[ "$PREVIOUS_ENABLED" == true ]]; then
-        systemctl enable "$SERVICE" >/dev/null 2>&1 || true
-    else
-        systemctl disable "$SERVICE" >/dev/null 2>&1 || true
-    fi
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || rollback_ok=false
 
     if [[ -n "$PREVIOUS_CURRENT_TARGET" ]]; then
         local restore_link="$APP_ROOT/.restore-$PREVIOUS_SHA-$$"
-        ln -s -- "$PREVIOUS_CURRENT_TARGET" "$restore_link"
-        mv -Tf -- "$restore_link" "$CURRENT_LINK"
+        ln -s -- "$PREVIOUS_CURRENT_TARGET" "$restore_link" || rollback_ok=false
+        mv -Tf -- "$restore_link" "$CURRENT_LINK" || rollback_ok=false
     else
-        rm -f -- "$CURRENT_LINK"
+        rm -f -- "$CURRENT_LINK" || rollback_ok=false
     fi
 
     if [[ -n "$PREVIOUS_REVISION_BACKUP" ]]; then
-        cp -p -- "$PREVIOUS_REVISION_BACKUP" "$REVISION_ENV"
+        cp -p -- "$PREVIOUS_REVISION_BACKUP" "$REVISION_ENV" || rollback_ok=false
     else
-        rm -f -- "$REVISION_ENV"
+        rm -f -- "$REVISION_ENV" || rollback_ok=false
     fi
 
     if [[ -n "$PREVIOUS_UNIT_BACKUP" ]]; then
-        cp -p -- "$PREVIOUS_UNIT_BACKUP" "$UNIT_DEST"
+        cp -p -- "$PREVIOUS_UNIT_BACKUP" "$UNIT_DEST" || rollback_ok=false
     else
-        rm -f -- "$UNIT_DEST"
+        rm -f -- "$UNIT_DEST" || rollback_ok=false
     fi
 
-    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || rollback_ok=false
+    if [[ "$PREVIOUS_ENABLED" == true ]]; then
+        systemctl enable "$SERVICE" >/dev/null 2>&1 || rollback_ok=false
+    else
+        systemctl disable "$SERVICE" >/dev/null 2>&1 || true
+    fi
     if [[ "$PREVIOUS_ACTIVE" == true ]]; then
-        systemctl start "$SERVICE" >/dev/null 2>&1 || true
+        systemctl start "$SERVICE" >/dev/null 2>&1 || rollback_ok=false
     else
         systemctl stop "$SERVICE" >/dev/null 2>&1 || true
     fi
 
+    if [[ -n "$PREVIOUS_CURRENT_TARGET" ]]; then
+        [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null)" == "$PREVIOUS_CURRENT_TARGET" ]] || rollback_ok=false
+    else
+        [[ ! -e "$CURRENT_LINK" && ! -L "$CURRENT_LINK" ]] || rollback_ok=false
+    fi
+    if [[ -n "$PREVIOUS_REVISION_BACKUP" ]]; then
+        cmp -s "$PREVIOUS_REVISION_BACKUP" "$REVISION_ENV" || rollback_ok=false
+    else
+        [[ ! -e "$REVISION_ENV" ]] || rollback_ok=false
+    fi
+    if [[ -n "$PREVIOUS_UNIT_BACKUP" ]]; then
+        cmp -s "$PREVIOUS_UNIT_BACKUP" "$UNIT_DEST" || rollback_ok=false
+    else
+        [[ ! -e "$UNIT_DEST" ]] || rollback_ok=false
+    fi
+    if [[ "$PREVIOUS_ENABLED" == true ]]; then
+        systemctl is-enabled --quiet "$SERVICE" 2>/dev/null || rollback_ok=false
+    elif systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+        rollback_ok=false
+    fi
+    if [[ "$PREVIOUS_ACTIVE" == true ]]; then
+        systemctl is-active --quiet "$SERVICE" 2>/dev/null || rollback_ok=false
+    elif systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+        rollback_ok=false
+    fi
+
+    if [[ "$PREVIOUS_ACTIVE" == true && -n "$PREVIOUS_SHA" ]]; then
+        local restore_attempt=1
+        local restored_health=false
+        while (( restore_attempt <= 10 )); do
+            local health_json
+            health_json="$(curl --fail --silent --show-error --max-time 3 "$HEALTH_URL" 2>/dev/null || true)"
+            if [[ -n "$health_json" ]] && python3 - "$PREVIOUS_SHA" "$health_json" <<'PY'
+import json
+import sys
+expected, raw = sys.argv[1], sys.argv[2]
+try:
+    value = json.loads(raw)
+except json.JSONDecodeError:
+    raise SystemExit(1)
+if value.get("status") != "ok" or value.get("storage") != "ok":
+    raise SystemExit(1)
+if value.get("revision") != expected:
+    raise SystemExit(1)
+PY
+            then
+                restored_health=true
+                break
+            fi
+            sleep 1
+            ((restore_attempt += 1))
+        done
+        [[ "$restored_health" == true ]] || rollback_ok=false
+    fi
+
     cleanup_backups
-    printf 'ACTIVATION_ROLLBACK=COMPLETE previous_revision=%s previous_active=%s previous_enabled=%s\n' \
-        "${PREVIOUS_SHA:-none}" "$PREVIOUS_ACTIVE" "$PREVIOUS_ENABLED" >&2
+    if [[ "$rollback_ok" == true ]]; then
+        printf 'ACTIVATION_ROLLBACK=COMPLETE previous_revision=%s previous_active=%s previous_enabled=%s\n' \
+            "${PREVIOUS_SHA:-none}" "$PREVIOUS_ACTIVE" "$PREVIOUS_ENABLED" >&2
+    else
+        printf 'ACTIVATION_ROLLBACK=FAILED previous_revision=%s previous_active=%s previous_enabled=%s\n' \
+            "${PREVIOUS_SHA:-none}" "$PREVIOUS_ACTIVE" "$PREVIOUS_ENABLED" >&2
+    fi
     exit "$original_status"
 }
 activation_exit() {
