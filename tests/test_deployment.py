@@ -31,6 +31,11 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("StateDirectory=telegram-llm", unit)
         self.assertIn("StateDirectoryMode=0700", unit)
         self.assertIn("ExecStartPre=", unit)
+        self.assertIn(
+            "ExecStart=/opt/telegram-llm/current/.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8787 --workers 1",
+            unit,
+        )
+        self.assertNotIn("/opt/telegram-llm/current/.venv/bin/uvicorn", unit)
         self.assertIn("--host 127.0.0.1 --port 8787 --workers 1", unit)
         self.assertNotIn("0.0.0.0", unit)
         self.assertNotIn("--port 8765", unit)
