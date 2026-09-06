@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 SERVICE="telegram-llm.service"
 SERVICE_USER="luke"
@@ -34,7 +34,7 @@ if [[ $# -eq 2 ]]; then
 fi
 [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected revision must be a full lowercase Git SHA"
 
-for command in git python3 tar install systemctl systemd-analyze curl stat getent sed; do
+for command in git python3 tar install systemctl systemd-analyze curl stat getent sed cp rm mv ln readlink mktemp awk grep ss journalctl sleep; do
     command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"
 done
 
@@ -60,10 +60,10 @@ if [[ -e "$RELEASE_DIR" ]]; then
     [[ -x "$RELEASE_DIR/.venv/bin/python" ]] || fail "existing release lacks virtual environment"
 else
     STAGING_DIR="$(mktemp -d "$RELEASE_ROOT/.staging-$EXPECTED_SHA.XXXXXX")"
-    cleanup() {
+    cleanup_staging() {
         rm -rf -- "$STAGING_DIR"
     }
-    trap cleanup EXIT
+    trap cleanup_staging EXIT
 
     git archive "$EXPECTED_SHA" | tar -x -C "$STAGING_DIR"
     printf '%s\n' "$EXPECTED_SHA" > "$STAGING_DIR/.source-revision"
@@ -102,14 +102,112 @@ install -d -m 0750 -o root -g "$SERVICE_GROUP" "$CONFIG_DIR"
 SECRET_META="$(stat -c '%U:%G:%a' "$SECRET_ENV")"
 [[ "$SECRET_META" == "root:$SERVICE_GROUP:640" ]] || fail "secret environment file must be owned root:$SERVICE_GROUP with mode 0640"
 
-if ! systemctl is-active --quiet "$SERVICE"; then
-    command -v ss >/dev/null 2>&1 || fail "required command missing for first activation: ss"
+PREVIOUS_CURRENT_TARGET=""
+PREVIOUS_SHA=""
+if [[ -L "$CURRENT_LINK" ]]; then
+    PREVIOUS_CURRENT_TARGET="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+    [[ -n "$PREVIOUS_CURRENT_TARGET" ]] || fail "existing current symlink is broken; repair or use rollback before activation"
+    [[ "$PREVIOUS_CURRENT_TARGET" == "$RELEASE_ROOT/"* ]] || fail "existing current symlink points outside the managed release root"
+    [[ -f "$PREVIOUS_CURRENT_TARGET/.source-revision" ]] || fail "existing selected release lacks revision marker"
+    PREVIOUS_SHA="$(cat "$PREVIOUS_CURRENT_TARGET/.source-revision")"
+    [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "existing selected release has invalid revision marker"
+    [[ "$PREVIOUS_CURRENT_TARGET" == "$RELEASE_ROOT/$PREVIOUS_SHA" ]] || fail "existing selected release path and revision marker disagree"
+elif [[ -e "$CURRENT_LINK" ]]; then
+    fail "current path exists and is not a symlink"
+fi
+
+PREVIOUS_UNIT_BACKUP=""
+if [[ -e "$UNIT_DEST" ]]; then
+    [[ -f "$UNIT_DEST" && ! -L "$UNIT_DEST" ]] || fail "installed unit path is not a regular file"
+    PREVIOUS_UNIT_BACKUP="$(mktemp /run/telegram-llm-unit-before.XXXXXX)"
+    cp -p -- "$UNIT_DEST" "$PREVIOUS_UNIT_BACKUP"
+fi
+
+PREVIOUS_REVISION_BACKUP=""
+if [[ -e "$REVISION_ENV" ]]; then
+    [[ -f "$REVISION_ENV" && ! -L "$REVISION_ENV" ]] || fail "revision environment path is not a regular file"
+    PREVIOUS_REVISION_BACKUP="$(mktemp /run/telegram-llm-revision-before.XXXXXX)"
+    cp -p -- "$REVISION_ENV" "$PREVIOUS_REVISION_BACKUP"
+fi
+
+PREVIOUS_ENABLED=false
+if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+    PREVIOUS_ENABLED=true
+fi
+PREVIOUS_ACTIVE=false
+if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    PREVIOUS_ACTIVE=true
+fi
+if [[ "$PREVIOUS_ACTIVE" == true && -z "$PREVIOUS_CURRENT_TARGET" ]]; then
+    fail "active service has no restorable managed current release"
+fi
+
+if [[ "$PREVIOUS_ACTIVE" != true ]]; then
     if ss -H -ltn | awk '{print $4}' | grep -Eq ":${PORT}$"; then
-        fail "TCP port $PORT is already in use before first activation"
+        fail "TCP port $PORT is already in use before activation"
     fi
 fi
 
-[[ ! -e "$CURRENT_LINK" || -L "$CURRENT_LINK" ]] || fail "current path exists and is not a symlink"
+TRANSACTION_ACTIVE=false
+cleanup_backups() {
+    [[ -z "$PREVIOUS_UNIT_BACKUP" ]] || rm -f -- "$PREVIOUS_UNIT_BACKUP"
+    [[ -z "$PREVIOUS_REVISION_BACKUP" ]] || rm -f -- "$PREVIOUS_REVISION_BACKUP"
+}
+restore_previous_activation() {
+    local original_status="$1"
+    trap - EXIT
+    set +e
+    printf 'ACTIVATION_ROLLBACK=START\n' >&2
+
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    if [[ "$PREVIOUS_ENABLED" == true ]]; then
+        systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+    else
+        systemctl disable "$SERVICE" >/dev/null 2>&1 || true
+    fi
+
+    if [[ -n "$PREVIOUS_CURRENT_TARGET" ]]; then
+        local restore_link="$APP_ROOT/.restore-$PREVIOUS_SHA-$$"
+        ln -s -- "$PREVIOUS_CURRENT_TARGET" "$restore_link"
+        mv -Tf -- "$restore_link" "$CURRENT_LINK"
+    else
+        rm -f -- "$CURRENT_LINK"
+    fi
+
+    if [[ -n "$PREVIOUS_REVISION_BACKUP" ]]; then
+        cp -p -- "$PREVIOUS_REVISION_BACKUP" "$REVISION_ENV"
+    else
+        rm -f -- "$REVISION_ENV"
+    fi
+
+    if [[ -n "$PREVIOUS_UNIT_BACKUP" ]]; then
+        cp -p -- "$PREVIOUS_UNIT_BACKUP" "$UNIT_DEST"
+    else
+        rm -f -- "$UNIT_DEST"
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [[ "$PREVIOUS_ACTIVE" == true ]]; then
+        systemctl start "$SERVICE" >/dev/null 2>&1 || true
+    else
+        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    fi
+
+    cleanup_backups
+    printf 'ACTIVATION_ROLLBACK=COMPLETE previous_revision=%s previous_active=%s previous_enabled=%s\n' \
+        "${PREVIOUS_SHA:-none}" "$PREVIOUS_ACTIVE" "$PREVIOUS_ENABLED" >&2
+    exit "$original_status"
+}
+activation_exit() {
+    local status="$?"
+    if [[ "$TRANSACTION_ACTIVE" == true && "$status" -ne 0 ]]; then
+        restore_previous_activation "$status"
+    fi
+    cleanup_backups
+}
+trap activation_exit EXIT
+TRANSACTION_ACTIVE=true
+
 NEXT_LINK="$APP_ROOT/.current-$EXPECTED_SHA-$$"
 ln -s -- "$RELEASE_DIR" "$NEXT_LINK"
 mv -Tf -- "$NEXT_LINK" "$CURRENT_LINK"
@@ -141,6 +239,9 @@ if value.get("revision") != expected:
     raise SystemExit(1)
 PY
     then
+        TRANSACTION_ACTIVE=false
+        cleanup_backups
+        trap - EXIT
         printf 'DEPLOYMENT_STATE=ACTIVE\n'
         printf 'HEALTH=PASS\n'
         printf 'REVISION=%s\n' "$EXPECTED_SHA"
