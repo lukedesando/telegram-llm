@@ -1,0 +1,29 @@
+[Unit]
+Description=Telegram LLM Flight Relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=luke
+Group=luke
+WorkingDirectory=/opt/telegram-llm/current
+EnvironmentFile=/etc/telegram-llm/telegram-llm.env
+EnvironmentFile=/etc/telegram-llm/revision.env
+Environment=DATABASE_PATH=/var/lib/telegram-llm/telegram-llm.sqlite3
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=telegram-llm
+StateDirectoryMode=0700
+ExecStart=/opt/telegram-llm/current/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8787 --workers 1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
