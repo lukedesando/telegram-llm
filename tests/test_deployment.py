@@ -71,6 +71,7 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertLess(trap_pos, switch_pos)
         self.assertIn('PREVIOUS_ENABLED=false', source)
         self.assertIn('PREVIOUS_ACTIVE=false', source)
+        self.assertIn('trap cleanup_backups EXIT', source)
         self.assertIn('restore_previous_activation()', source)
         self.assertIn('if [[ -n "$PREVIOUS_CURRENT_TARGET" ]]', source)
         self.assertIn('rm -f -- "$CURRENT_LINK"', source)
@@ -78,9 +79,15 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('rm -f -- "$REVISION_ENV"', source)
         self.assertIn('cp -p -- "$PREVIOUS_UNIT_BACKUP" "$UNIT_DEST"', source)
         self.assertIn('rm -f -- "$UNIT_DEST"', source)
+        self.assertIn('cmp -s "$PREVIOUS_REVISION_BACKUP" "$REVISION_ENV"', source)
+        self.assertIn('cmp -s "$PREVIOUS_UNIT_BACKUP" "$UNIT_DEST"', source)
+        self.assertIn('systemctl is-enabled --quiet "$SERVICE"', source)
+        self.assertIn('systemctl is-active --quiet "$SERVICE"', source)
         self.assertIn('systemctl start "$SERVICE"', source)
         self.assertIn('systemctl stop "$SERVICE"', source)
+        self.assertIn('health_json="$(curl --fail', source)
         self.assertIn('ACTIVATION_ROLLBACK=COMPLETE', source)
+        self.assertIn('ACTIVATION_ROLLBACK=FAILED', source)
         self.assertIn('TRANSACTION_ACTIVE=false', source)
 
     def test_rollback_can_recover_when_current_path_is_broken(self):
