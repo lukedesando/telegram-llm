@@ -30,18 +30,40 @@ Credential-free source qualification passed before each merge. Live Telegram -> 
 
 ### Wave 2 — flight reliability and deployment — IN PROGRESS
 
-1. Add retry/idempotency/status/new-conversation controls. — source implemented on `wave2-flight-reliability-20260905`; credential-free suite 32/32 passing before PR creation
+1. Add retry/idempotency/status/new-conversation controls. — accepted in PR #5
    - persistent Telegram update processing/completion records in SQLite
    - five-minute stale processing lease with immediate release on handler failure/cancellation
    - `/status` local status command
    - `/new` using the established context-reset behavior
    - `/health` verifies SQLite and returns 503 when durable storage is unavailable
    - `APP_REVISION` surfaced through `/health` and `/status` for exact-revision qualification
-2. Deploy as a single-worker standalone Pi service behind a public HTTPS webhook. — pending
-3. Qualify live OpenAI responses and Telegram delivery. — pending
-4. Run restart, long-conversation, failure, and end-to-end acceptance tests on the exact deployed revision. — pending
+2. Standalone Pi deployment package. — source implemented on `wave2-standalone-pi-deployment-20260906`; live activation pending
+   - OpenAI SDK pinned for repeatable installation
+   - immutable releases under `/opt/telegram-llm/releases/<sha>`
+   - prepare-only path cannot change the active release/unit
+   - activation requires a clean exact `main` SHA and an existing secret environment file
+   - systemd unit runs as `luke`, one worker, bound only to `127.0.0.1:8787`
+   - startup preflight validates required secrets/configuration without printing secret values
+   - rollback selects only an already-installed exact release
+   - non-mutating local Pi qualification binds runtime evidence to the expected SHA
+   - deployment delta tests: 9/9 passing after prepare/rollback systemd-verification repair
+3. Activate the exact release behind a selected public HTTPS webhook route. — pending
+4. Qualify live OpenAI responses and Telegram delivery. — pending
+5. Run service-restart, long-conversation/compaction, PDF, search, reset, and end-to-end acceptance on the exact deployed revision. — pending
 
 Acceptance: exact deployed revision passes the flight qualification checklist and remains operable without the user's laptop.
+
+## Current live-runtime boundary
+
+The source repository deliberately does not choose or configure the public HTTPS ingress mechanism and does not contain real Telegram/OpenAI credentials. Activation therefore requires externally established values for:
+
+- `TELEGRAM_TOKEN`;
+- `TELEGRAM_ALLOWED_USER_ID`;
+- `WEBHOOK_SECRET_TOKEN`;
+- `OPENAI_API_KEY`;
+- `WEBHOOK_BASE_URL`, whose public HTTPS route must forward `/webhook` to `127.0.0.1:8787`.
+
+Homebrew-managed deployment remains deferred. The current Homebrew Remote Operator scope does not include `telegram-llm` and must not be broadened merely to bypass this standalone deployment boundary.
 
 ## Reliability boundary
 
