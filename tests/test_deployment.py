@@ -56,11 +56,32 @@ class DeploymentContractTests(unittest.TestCase):
     def test_activation_requires_secret_file_metadata_and_exact_health(self):
         source = (DEPLOY / "install_pi.sh").read_text(encoding="utf-8")
         self.assertIn('root:$SERVICE_GROUP:640', source)
-        self.assertIn('TCP port $PORT is already in use before first activation', source)
+        self.assertIn('TCP port $PORT is already in use before activation', source)
         self.assertIn('value.get("revision") != expected', source)
         self.assertIn('value.get("storage") != "ok"', source)
         self.assertIn('systemd-analyze verify "$UNIT_DEST"', source)
         self.assertNotIn("set -x", source)
+
+    def test_activation_failure_restores_preexisting_or_first_install_state(self):
+        source = (DEPLOY / "install_pi.sh").read_text(encoding="utf-8")
+        capture_pos = source.index('PREVIOUS_CURRENT_TARGET=""')
+        trap_pos = source.index('trap activation_exit EXIT')
+        switch_pos = source.index('NEXT_LINK="$APP_ROOT/.current-')
+        self.assertLess(capture_pos, trap_pos)
+        self.assertLess(trap_pos, switch_pos)
+        self.assertIn('PREVIOUS_ENABLED=false', source)
+        self.assertIn('PREVIOUS_ACTIVE=false', source)
+        self.assertIn('restore_previous_activation()', source)
+        self.assertIn('if [[ -n "$PREVIOUS_CURRENT_TARGET" ]]', source)
+        self.assertIn('rm -f -- "$CURRENT_LINK"', source)
+        self.assertIn('cp -p -- "$PREVIOUS_REVISION_BACKUP" "$REVISION_ENV"', source)
+        self.assertIn('rm -f -- "$REVISION_ENV"', source)
+        self.assertIn('cp -p -- "$PREVIOUS_UNIT_BACKUP" "$UNIT_DEST"', source)
+        self.assertIn('rm -f -- "$UNIT_DEST"', source)
+        self.assertIn('systemctl start "$SERVICE"', source)
+        self.assertIn('systemctl stop "$SERVICE"', source)
+        self.assertIn('ACTIVATION_ROLLBACK=COMPLETE', source)
+        self.assertIn('TRANSACTION_ACTIVE=false', source)
 
     def test_rollback_can_recover_when_current_path_is_broken(self):
         source = (DEPLOY / "rollback_pi.sh").read_text(encoding="utf-8")
