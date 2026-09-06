@@ -111,9 +111,9 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         stats = conversation_store.conversation_stats(_conversation_id(update))
         storage_status = "ok" if conversation_store.ping() else "error"
         await update.message.reply_text(
-            f"Status: ready | model {settings.openai_model} | storage {storage_status} | "
-            f"messages {stats.message_count} | summary {'yes' if stats.summary_present else 'no'} | "
-            f"pending {stats.pending_message_count}"
+            f"Status: ready | revision {settings.app_revision} | model {settings.openai_model} | "
+            f"storage {storage_status} | messages {stats.message_count} | "
+            f"summary {'yes' if stats.summary_present else 'no'} | pending {stats.pending_message_count}"
         )
 
     processed = await update_deduplicator.run(update.update_id, process)
