@@ -15,19 +15,24 @@ This runbook deploys `telegram-llm` as a standalone service on `pi-guy`. It deli
 - SQLite state: `/var/lib/telegram-llm/telegram-llm.sqlite3`
 - Local listener: `127.0.0.1:8787`
 - Uvicorn workers: exactly 1
+- Public webhook base: `https://telegram.desando.org`
+- Public webhook path: `/webhook` only
+- Public ingress: existing Homebrew-owned remotely managed Cloudflare Tunnel
+- Private operator access: Tailscale
 
 Port 8787 is intentionally separate from the currently documented Auto-Application listener on 8765 and status dashboard listener on 8766. When the relay service is not already active, the installer refuses activation if 8787 is already listening.
 
 ## External prerequisites
 
-Activation requires two things that are intentionally not created by the repository installer:
+Activation requires:
 
 1. real Telegram/OpenAI credentials in the secret environment file;
-2. a public HTTPS endpoint represented by `WEBHOOK_BASE_URL` that routes Telegram's `POST <base>/webhook` to `http://127.0.0.1:8787/webhook` on the Pi.
+2. the approved Cloudflare published-application route `telegram.desando.org` + exact `/webhook` path to `http://127.0.0.1:8787`;
+3. the Cloudflare Access/WAF controls defined in `CLOUDFLARE_TELEGRAM_INGRESS.md`.
 
-The public-ingress mechanism is not selected by this repository. Cloudflare Tunnel, Tailscale Funnel, a conventional reverse proxy, or another mechanism would change the external exposure/trust boundary and must be chosen separately. Do not expose Uvicorn directly to the Internet; the systemd unit binds only to loopback.
+The public-ingress architecture is approved: reuse the existing Homebrew Cloudflare Tunnel connector for Telegram delivery and retain Tailscale only for private administration. Do not create a second tunnel connector, expose Uvicorn directly to the Internet, or open a router port.
 
-`/health` is required locally. It does not need to be publicly exposed for Telegram operation.
+`/health` is a local qualification endpoint. It must not be intentionally published.
 
 ## 1. Reconcile exact source
 
@@ -60,7 +65,7 @@ PREPARED_RELEASE=/opt/telegram-llm/releases/<SHA>
 DEPLOYMENT_STATE=PREPARED_INACTIVE
 ```
 
-This step is safe to complete before the public endpoint or credentials are ready.
+This step is safe to complete before the Cloudflare route or credentials are ready.
 
 ## 3. Create the secret environment file
 
@@ -79,32 +84,46 @@ Use `deploy/telegram-llm.env.example` as the field list. Required values are:
 ```text
 TELEGRAM_TOKEN
 TELEGRAM_ALLOWED_USER_ID
-WEBHOOK_BASE_URL
+WEBHOOK_BASE_URL=https://telegram.desando.org
 WEBHOOK_SECRET_TOKEN
 OPENAI_API_KEY
 ```
+
+`WEBHOOK_BASE_URL` must be an origin only. Do not add `/webhook`; the application appends that path itself.
 
 Do not put `APP_REVISION` or `DATABASE_PATH` in this file. Deployment owns those values separately so a secret-file edit cannot change source identity or move SQLite state.
 
 Do not paste real credentials into GitHub issues, PRs, Actions logs, shell history, or this repository.
 
-## 4. Establish public HTTPS ingress
+## 4. Establish the approved Cloudflare ingress
 
-Configure the separately selected ingress mechanism so the configured base URL sends:
+Use the existing Homebrew-owned remotely managed Cloudflare Tunnel. Do not create or restart a second connector merely for this relay.
 
-```text
-POST https://<public-base>/webhook
-```
-
-to:
+Configure the Cloudflare control plane according to `docs/CLOUDFLARE_TELEGRAM_INGRESS.md`:
 
 ```text
-http://127.0.0.1:8787/webhook
+Hostname:    telegram.desando.org
+Path:        ^/webhook$
+Service URL: http://127.0.0.1:8787
 ```
 
-`WEBHOOK_BASE_URL` is the base only and must not end with `/`; the application appends `/webhook` itself.
+The route must preserve the public Host header and forward the full `/webhook` path unchanged.
 
-The startup preflight fails before contacting Telegram if the URL is not an absolute HTTPS URL, required credentials are absent, the revision is not a full Git SHA, or the SQLite state directory is not writable.
+Security requirements are cumulative:
+
+- the tunnel route is path-scoped to the exact webhook;
+- the hostname remains deny-by-default under Cloudflare Access;
+- only the more-specific `/webhook` Access application is bypassed for machine delivery;
+- a Cloudflare WAF custom rule blocks wrong method/path and sources outside Telegram's currently documented webhook networks;
+- the application returns 404 for non-webhook requests addressed to the configured public Host;
+- the application independently requires `X-Telegram-Bot-Api-Secret-Token`;
+- the bot remains restricted to the configured Telegram user ID.
+
+Do not configure an origin `httpHostHeader` override and do not enable Tunnel-side Access JWT validation for this bypassed webhook route.
+
+Before flight qualification, re-check Telegram's current official webhook source ranges and update the WAF rule if Telegram has changed them.
+
+The startup preflight fails before contacting Telegram if `WEBHOOK_BASE_URL` is not an absolute pathless HTTPS origin, required credentials are absent, the revision is not a full Git SHA, or the SQLite state directory is not writable.
 
 ## 5. Activate the exact prepared revision
 
@@ -152,9 +171,21 @@ Expected result:
 LOCAL_PI_QUALIFICATION=PASS
 ```
 
-## 7. Live Telegram/OpenAI acceptance
+## 7. Cloudflare boundary checks
 
-Local qualification does not prove public routing, Telegram delivery, or paid OpenAI execution. Complete these checks from the user's Telegram client after the local gate passes:
+After local qualification and before relying on Telegram delivery:
+
+1. Verify the existing Homebrew Cloudflare connector is healthy without restarting it.
+2. Confirm the published route is exactly `telegram.desando.org` + `^/webhook$` -> `http://127.0.0.1:8787`.
+3. Confirm the WAF rule and path-specific Access Bypass from `CLOUDFLARE_TELEGRAM_INGRESS.md` are active.
+4. Confirm `https://telegram.desando.org/health` does **not** expose the local health payload.
+5. Confirm no broader route to port 8787 exists.
+
+A browser or ordinary Internet client is expected to be unable to exercise the webhook successfully; Cloudflare should reject non-Telegram source IPs before origin.
+
+## 8. Live Telegram/OpenAI acceptance
+
+Local qualification does not prove Telegram delivery or paid OpenAI execution. Complete these checks from the user's Telegram client after the Cloudflare gate passes:
 
 1. Send `/status`. It must return the expected `APP_REVISION`, configured OpenAI model, and `storage ok` without consuming an OpenAI model call.
 2. Send a normal prompt such as `Reply exactly: FLIGHT-RELAY-OK`. The reply must arrive through Telegram and match the instruction.
@@ -169,13 +200,15 @@ A real host reboot is not part of the default acceptance procedure because it is
 
 ## Rollback
 
-Rollback never downloads code. It can select only an already-installed immutable release whose marker matches the requested SHA.
+Application rollback never downloads code. It can select only an already-installed immutable release whose marker matches the requested SHA.
 
 ```bash
 sudo ./deploy/rollback_pi.sh <previous-40-character-sha>
 ```
 
 The rollback helper restores the release's own unit, revision environment, and active symlink, restarts the service, and requires `/health` to report that exact previous SHA.
+
+Cloudflare ingress can be rolled back independently by removing/disabling only the Telegram published route, Telegram-host WAF rule, and `/webhook` path-specific Access application. Do not disturb the shared Homebrew connector or the existing `apply.desando.org` route.
 
 ## Failure interpretation
 
@@ -185,9 +218,9 @@ The rollback helper restores the release's own unit, revision environment, and a
 - `ACTIVATION_ROLLBACK=COMPLETE`: activation failed, but the installer verified restoration of the prior managed state (or clean inactive first-install state).
 - `ACTIVATION_ROLLBACK=FAILED`: activation failed and restoration could not be fully verified; stop and recover the standalone service state before another activation attempt.
 - local health fails after restart: inspect `systemctl status telegram-llm.service` and its journal; the installer prints both on failure.
-- local qualification passes but Telegram messages do not arrive: investigate the public HTTPS route and Telegram webhook configuration before changing the application.
+- local qualification passes but Telegram messages do not arrive: inspect the exact Cloudflare route, WAF events, Access path policy, and Telegram webhook state before changing the application.
 - Telegram delivery works but model prompts fail: investigate OpenAI credential/API errors without weakening the webhook or storage gates.
 
 ## Authority boundary
 
-The deployment scripts are standalone host-admin tools. They are not Homebrew Remote Operator operations and must not be smuggled through its typed request protocol as arbitrary commands or paths. If remote managed deployment is desired later, that is a separate Homebrew integration project with its own reviewed operation/manifest and authority model.
+The deployment scripts are standalone host-admin tools. They are not Homebrew Remote Operator operations and must not be smuggled through its typed request protocol as arbitrary commands or paths. The existing Homebrew Cloudflare connector may be reused as approved transport, but `telegram-llm` application deployment remains standalone. If remote managed application deployment is desired later, that is a separate Homebrew integration project with its own reviewed operation/manifest and authority model.
