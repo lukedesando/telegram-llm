@@ -90,6 +90,7 @@ class DeploymentContractTests(unittest.TestCase):
     def test_preflight_accepts_valid_environment_without_secret_values_in_errors(self):
         preflight = _load_preflight_module()
         with tempfile.TemporaryDirectory() as tmp:
+            database_path = str(pathlib.Path(tmp) / "telegram-llm.sqlite3")
             env = {
                 "TELEGRAM_TOKEN": "telegram-secret-value",
                 "TELEGRAM_ALLOWED_USER_ID": "123456789",
@@ -97,9 +98,12 @@ class DeploymentContractTests(unittest.TestCase):
                 "WEBHOOK_SECRET_TOKEN": "webhook-secret-value",
                 "OPENAI_API_KEY": "openai-secret-value",
                 "APP_REVISION": "a" * 40,
-                "DATABASE_PATH": str(pathlib.Path(tmp) / "telegram-llm.sqlite3"),
+                "DATABASE_PATH": database_path,
             }
-            errors = preflight.validate_environment(env)
+            errors = preflight.validate_environment(
+                env,
+                expected_database_path=database_path,
+            )
         self.assertEqual(errors, [])
         joined = " ".join(errors)
         self.assertNotIn("telegram-secret-value", joined)
@@ -124,7 +128,26 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("WEBHOOK_BASE_URL must be an absolute HTTPS URL", joined)
         self.assertIn("WEBHOOK_BASE_URL must not end with a slash", joined)
         self.assertIn("APP_REVISION must be a full 40-character lowercase Git SHA", joined)
-        self.assertIn("DATABASE_PATH must be absolute in the Pi service", joined)
+        self.assertIn("DATABASE_PATH must be exactly /var/lib/telegram-llm/telegram-llm.sqlite3", joined)
+
+    def test_preflight_rejects_secret_file_database_override_and_bad_url_components(self):
+        preflight = _load_preflight_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "TELEGRAM_TOKEN": "token",
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "WEBHOOK_BASE_URL": "https://user:pass@relay.example.com/base?x=1#fragment",
+                "WEBHOOK_SECRET_TOKEN": "secret",
+                "OPENAI_API_KEY": "key",
+                "APP_REVISION": "A" * 40,
+                "DATABASE_PATH": str(pathlib.Path(tmp) / "override.sqlite3"),
+            }
+            errors = preflight.validate_environment(env)
+        joined = " | ".join(errors)
+        self.assertIn("WEBHOOK_BASE_URL must not embed credentials", joined)
+        self.assertIn("WEBHOOK_BASE_URL must not contain a query or fragment", joined)
+        self.assertIn("APP_REVISION must be a full 40-character lowercase Git SHA", joined)
+        self.assertIn("DATABASE_PATH must be exactly /var/lib/telegram-llm/telegram-llm.sqlite3", joined)
 
 
 if __name__ == "__main__":
