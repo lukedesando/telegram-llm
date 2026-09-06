@@ -53,6 +53,17 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn('s#/opt/telegram-llm/current#$RELEASE_DIR#g', source)
         self.assertIn('systemd-analyze verify "$VERIFY_UNIT"', source)
 
+    def test_prepared_release_root_is_service_traversable_before_promotion(self):
+        source = (DEPLOY / "install_pi.sh").read_text(encoding="utf-8")
+        chmod_pos = source.index('chmod 0755 "$STAGING_DIR"')
+        promote_pos = source.index('mv -- "$STAGING_DIR" "$RELEASE_DIR"')
+        prepare_exit = source.index('if [[ "$MODE" == "prepare" ]]')
+        self.assertLess(chmod_pos, promote_pos)
+        self.assertLess(promote_pos, prepare_exit)
+        self.assertIn("RELEASE_META=\"$(stat -c '%U:%G:%a' \"$RELEASE_DIR\")\"", source)
+        self.assertIn('[[ "$RELEASE_META" == "root:root:755" ]]', source)
+        self.assertIn('release root must be owned root:root with mode 0755', source)
+
     def test_activation_requires_secret_file_metadata_and_exact_health(self):
         source = (DEPLOY / "install_pi.sh").read_text(encoding="utf-8")
         self.assertIn('root:$SERVICE_GROUP:640', source)

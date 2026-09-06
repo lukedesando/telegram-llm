@@ -34,7 +34,7 @@ if [[ $# -eq 2 ]]; then
 fi
 [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected revision must be a full lowercase Git SHA"
 
-for command in git python3 tar install systemctl systemd-analyze curl stat getent sed cp rm mv ln readlink mktemp awk grep ss journalctl sleep cmp; do
+for command in git python3 tar install systemctl systemd-analyze curl stat getent sed cp rm mv ln readlink mktemp awk grep ss journalctl sleep cmp chmod; do
     command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"
 done
 
@@ -74,9 +74,16 @@ else
         --requirement "$STAGING_DIR/requirements.txt"
     "$STAGING_DIR/.venv/bin/python" -m compileall -q "$STAGING_DIR"
 
+    # mktemp -d deliberately creates the private staging root as 0700. The
+    # service runs as luke, so make only the completed release root traversable
+    # before it becomes immutable and selectable through /opt/telegram-llm/current.
+    chmod 0755 "$STAGING_DIR"
     mv -- "$STAGING_DIR" "$RELEASE_DIR"
     trap - EXIT
 fi
+
+RELEASE_META="$(stat -c '%U:%G:%a' "$RELEASE_DIR")"
+[[ "$RELEASE_META" == "root:root:755" ]] || fail "release root must be owned root:root with mode 0755"
 
 VERIFY_UNIT="$(mktemp /run/telegram-llm-verify.XXXXXX.service)"
 cleanup_verify() {
