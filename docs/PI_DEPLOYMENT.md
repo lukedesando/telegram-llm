@@ -16,7 +16,7 @@ This runbook deploys `telegram-llm` as a standalone service on `pi-guy`. It deli
 - Local listener: `127.0.0.1:8787`
 - Uvicorn workers: exactly 1
 
-Port 8787 is intentionally separate from the currently documented Auto-Application listener on 8765 and status dashboard listener on 8766. The installer also refuses first activation if 8787 is already listening.
+Port 8787 is intentionally separate from the currently documented Auto-Application listener on 8765 and status dashboard listener on 8766. When the relay service is not already active, the installer refuses activation if 8787 is already listening.
 
 ## External prerequisites
 
@@ -114,9 +114,11 @@ Run from the same clean `main` checkout and use the recorded SHA:
 sudo ./deploy/install_pi.sh "$SHA"
 ```
 
-Activation atomically selects the immutable release, writes `/etc/telegram-llm/revision.env`, installs the unit from that release, verifies it with `systemd-analyze`, enables and restarts the service, then requires local `/health` to report the exact SHA and healthy SQLite state.
+Activation snapshots the previously selected managed release, installed unit, revision environment, and enabled/active service state before the first promotion mutation. It then atomically selects the immutable release, writes `/etc/telegram-llm/revision.env`, installs the unit from that release, verifies it with `systemd-analyze`, enables and restarts the service, then requires local `/health` to report the exact SHA and healthy SQLite state.
 
-Expected final lines:
+If any post-promotion step fails, the installer automatically restores the pre-activation managed state. For an existing active release, restoration is accepted only after the prior symlink, unit, revision file, enabled/active state, and local health/revision are re-verified. For a first installation, failure removes the selected release symlink/unit/revision state and returns the service to inactive/disabled state. The installer emits `ACTIVATION_ROLLBACK=COMPLETE` only when those restoration checks pass; otherwise it emits `ACTIVATION_ROLLBACK=FAILED` so manual recovery is not mistaken for a successful rollback.
+
+Expected successful final lines:
 
 ```text
 DEPLOYMENT_STATE=ACTIVE
@@ -178,8 +180,10 @@ The rollback helper restores the release's own unit, revision environment, and a
 ## Failure interpretation
 
 - `PREFLIGHT_ERROR=...`: configuration or state directory is invalid; no application process starts.
-- `TCP port 8787 is already in use before first activation`: investigate the listener; do not change the port ad hoc.
+- `TCP port 8787 is already in use before activation`: investigate the listener; do not change the port ad hoc.
 - systemd verification failure: repair the source unit before activation.
+- `ACTIVATION_ROLLBACK=COMPLETE`: activation failed, but the installer verified restoration of the prior managed state (or clean inactive first-install state).
+- `ACTIVATION_ROLLBACK=FAILED`: activation failed and restoration could not be fully verified; stop and recover the standalone service state before another activation attempt.
 - local health fails after restart: inspect `systemctl status telegram-llm.service` and its journal; the installer prints both on failure.
 - local qualification passes but Telegram messages do not arrive: investigate the public HTTPS route and Telegram webhook configuration before changing the application.
 - Telegram delivery works but model prompts fail: investigate OpenAI credential/API errors without weakening the webhook or storage gates.
