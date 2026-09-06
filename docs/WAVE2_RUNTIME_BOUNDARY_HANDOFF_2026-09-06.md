@@ -2,25 +2,25 @@
 
 ## Objective
 
-Complete the flight-ready single-user Telegram relay and deploy it as a standalone Raspberry Pi service without broadening Homebrew runtime authority or silently choosing a new public-ingress trust boundary.
+Complete the flight-ready single-user Telegram relay and deploy it as a standalone Raspberry Pi service using the approved Cloudflare public-webhook / Tailscale private-admin architecture.
 
 ## Current authoritative source state
 
 - Repository: `lukedesando/telegram-llm`
-- Accepted source through PR #6
-- PR #6 squash merge on `main`: `aec4400ca260ef919c2ee63c6ad2aaaacdccd115`
+- Base `main` before the current ingress-hardening tranche: `9a54649614f0440e485238bb18d2ba050f47e0cc`
+- Current source branch: `wave2-cloudflare-ingress-hardening-20260906`
 - OpenAI-only Responses API relay: accepted
 - SQLite durable history/rolling compaction: accepted
 - Telegram update duplicate suppression/status/reset controls: accepted
 - Standalone Pi deployment/rollback/qualification package: accepted
-- No live `telegram-llm` service deployment has been performed by this work
-- No public webhook route has been created by this work
+- Cloudflare/Tailscale architecture: approved by the user
+- Cloudflare ingress hardening and runbook: implemented on the current branch; merge pending
+- No live `telegram-llm` Pi deployment has been performed by this work
+- No `telegram.desando.org` Cloudflare route has been created by this work
 
-## Completed source work
+## Completed accepted source work
 
 ### PR #5 — reliability controls
-
-Accepted and merged before PR #6.
 
 - persistent Telegram update processing/completion records
 - five-minute processing lease with retry after abandonment
@@ -29,70 +29,85 @@ Accepted and merged before PR #6.
 - `/new` context reset alias
 - storage-aware `/health`
 - exact `APP_REVISION` reporting
-- credential-free source suite: 32/32 passing before merge
 
 ### PR #6 — standalone Pi deployment
 
-Accepted and merged as `aec4400ca260ef919c2ee63c6ad2aaaacdccd115`.
+Merged as `aec4400ca260ef919c2ee63c6ad2aaaacdccd115`.
 
 - OpenAI Python SDK pinned to `3.8.0`
 - immutable releases under `/opt/telegram-llm/releases/<sha>`
-- `--prepare-only` cannot change active/next-start release
+- prepare-only cannot change active/next-start release
 - single-worker systemd service on `127.0.0.1:8787`
 - service user/group `luke:luke`
 - secret-safe startup preflight
 - deployment-owned SQLite path `/var/lib/telegram-llm/telegram-llm.sqlite3`
-- transactional activation with verified restoration of prior managed state on post-promotion failure
-- first-install activation failure returns to no selected unit/revision/current state and inactive/disabled service state
+- transactional activation with verified restoration after post-promotion failure
 - explicit rollback to already-installed exact releases
 - non-mutating local Pi qualification
-- executable install/rollback/qualification entrypoints
 - deployment delta contract suite: 11/11 passing
-- shell syntax gates passing
-- systemd unit verified in a host-like sandbox; installer re-verifies on `pi-guy`
 
-## Exact execution boundary
+### PR #7 — first runtime-boundary closeout
 
-Continuing from source into live activation requires external runtime state that is not available through the current repository/GitHub control surface and includes user-owned trust/credential decisions.
+Merged as `9a54649614f0440e485238bb18d2ba050f47e0cc`.
 
-Required values/state:
+That handoff originally left the ingress mechanism undecided. The user has since resolved that decision: use Cloudflare Tunnel for public Telegram webhook ingress and Tailscale only for private administration.
 
-- `TELEGRAM_TOKEN`
-- `TELEGRAM_ALLOWED_USER_ID`
-- `WEBHOOK_SECRET_TOKEN`
-- `OPENAI_API_KEY`
-- a selected public HTTPS ingress mechanism and resulting `WEBHOOK_BASE_URL`
+## Current ingress-hardening tranche
 
-The public endpoint must route:
+The current branch makes the approved design explicit and fail-closed in source:
 
-```text
-POST https://<public-base>/webhook
-```
+- public base is `https://telegram.desando.org`;
+- reuse the existing Homebrew-owned remotely managed Cloudflare Tunnel connector;
+- publish only exact `/webhook` to `http://127.0.0.1:8787`;
+- keep the hostname deny-by-default under Cloudflare Access;
+- use a more-specific Access Bypass only for `/webhook`, because Telegram cannot supply Cloudflare Access service-token headers;
+- use a Cloudflare WAF Block rule so only exact `POST /webhook` from Telegram's currently documented webhook source ranges proceeds;
+- application middleware independently returns 404 for all non-webhook requests addressed to the configured public Host;
+- Telegram's secret header is validated with constant-time comparison;
+- `WEBHOOK_BASE_URL` must be a pathless HTTPS origin;
+- `/health` remains a local/Tailscale-only qualification endpoint.
 
-to:
+Full ingress contract: `docs/CLOUDFLARE_TELEGRAM_INGRESS.md`.
 
-```text
-http://127.0.0.1:8787/webhook
-```
+Credential-free branch qualification after these changes: **47/47 passing**, with `ResourceWarning` promoted to an error. The logged compaction exception is intentional test evidence and passes because raw history is preserved.
 
-## Why current authority does not cover it
+## Exact remaining execution boundary
 
-- `telegram-llm` is not in the current Homebrew Remote Operator repository scope.
-- The Homebrew Remote Operator is a typed operation surface, not an arbitrary shell; the standalone deployment scripts cannot be routed through it as command text or paths.
-- Adding `telegram-llm` to Homebrew managed deployment/Remote Operator scope is explicitly deferred and would be a separate architecture/authority change.
-- Selecting Cloudflare Tunnel, Tailscale Funnel, another reverse proxy, or another public ingress mechanism changes the external exposure/trust boundary and is reserved for the user.
-- Real Telegram/OpenAI credential material is intentionally absent from source and must not be placed in GitHub issues, PRs, Actions logs, or repository files.
+The ingress **design decision is resolved**. Continuing into live service acceptance now requires external control-plane/secret/host state that is not available through the current GitHub tool surface:
 
-## Smallest input/action needed to resume
+1. Apply the reviewed Cloudflare configuration to the existing tunnel:
+   - `telegram.desando.org`
+   - exact `/webhook` published route to `http://127.0.0.1:8787`
+   - host-level deny-by-default Access policy
+   - path-specific `/webhook` Access Bypass
+   - Telegram-host WAF rule from `docs/CLOUDFLARE_TELEGRAM_INGRESS.md`.
+2. Put the runtime values on `pi-guy` in `/etc/telegram-llm/telegram-llm.env` with `root:luke:0640` permissions:
+   - `TELEGRAM_TOKEN`
+   - `TELEGRAM_ALLOWED_USER_ID`
+   - `WEBHOOK_BASE_URL=https://telegram.desando.org`
+   - `WEBHOOK_SECRET_TOKEN`
+   - `OPENAI_API_KEY`.
+3. Execute the standalone Pi prepare/activate/qualification commands.
+4. Run live Telegram/OpenAI acceptance.
 
-1. Select/approve the public HTTPS ingress mechanism for this relay.
-2. Make the required Telegram/OpenAI credential values available on `pi-guy` in `/etc/telegram-llm/telegram-llm.env` with `root:luke:0640` permissions, without placing them in GitHub/chat-visible source.
-3. Ensure the corresponding public `WEBHOOK_BASE_URL` is known.
-4. Provide a host execution path for the standalone commands, or explicitly authorize a separate reviewed Homebrew integration project if remote managed deployment is desired instead.
+No Cloudflare management plugin is available in the current ChatGPT tool environment, and the real credential values are intentionally absent from Git/GitHub/chat. `telegram-llm` also remains outside Homebrew Remote Operator application-deployment scope.
 
-No product or source-design decision remains before these runtime prerequisites.
+## Why existing authority does not cover those actions
 
-## Continuation sequence after boundary resolution
+- User approval covers the Cloudflare/Tailscale architecture, so no further design selection is needed.
+- Applying policies/routes to the user's Cloudflare account requires a Cloudflare control-plane capability or dashboard/API credential not available here.
+- Real Telegram/OpenAI secrets must not be committed or pasted into GitHub/chat-visible surfaces.
+- Standalone application deployment on `pi-guy` requires a host execution path; the existing Homebrew Remote Operator must not be broadened into arbitrary shell execution.
+
+## Smallest input/action needed after source merge
+
+- Apply or provide an authorized way to apply the reviewed Cloudflare settings.
+- Put the required runtime secrets on `pi-guy` without exposing their values in chat/GitHub.
+- Provide/use a standalone SSH/Termius execution path for the source-controlled deployment commands.
+
+No additional product, model, transport, deployment-style, or ingress-architecture decision remains.
+
+## Continuation sequence after external prerequisites exist
 
 From a clean exact `main` checkout on `pi-guy`:
 
@@ -104,35 +119,36 @@ git status --short
 SHA="$(git rev-parse HEAD)"
 ```
 
-Then:
+Prepare:
 
 ```bash
 sudo ./deploy/install_pi.sh "$SHA" --prepare-only
 ```
 
-After secret environment and HTTPS ingress are ready:
+After the secret environment and Cloudflare route/policies are present:
 
 ```bash
 sudo ./deploy/install_pi.sh "$SHA"
 sudo ./deploy/qualify_pi.sh "$SHA"
 ```
 
-Then complete the live Telegram/OpenAI acceptance sequence in `docs/PI_DEPLOYMENT.md`:
+Then perform the Cloudflare boundary checks and live Telegram/OpenAI acceptance in `docs/PI_DEPLOYMENT.md`:
 
-1. `/status`
-2. normal OpenAI reply
-3. `/search`
-4. `/weather`
-5. `/pdf`
-6. service restart with memory persistence check
-7. enough conversation turns to cross compaction threshold, then verify early memory
-8. `/new` reset verification
+1. public `/health` is not exposed;
+2. `/status`;
+3. normal OpenAI reply;
+4. `/search`;
+5. `/weather`;
+6. `/pdf`;
+7. service restart with durable-memory check;
+8. cross the compaction threshold and verify early memory;
+9. `/new` reset verification.
 
 Wave 2 is complete only after those exact-revision runtime gates pass.
 
 ## Intentionally deferred / out of current scope
 
-- Homebrew-managed deployment
+- Homebrew-managed application deployment
 - multi-worker deployment
 - transactional exactly-once Telegram outbound queue
 - WhatsApp/Twilio

@@ -19,11 +19,19 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn(("post", "/webhook"), routes)
         self.assertIn(("get", "/health"), routes)
 
-    def test_webhook_secret_header_remains_checked(self):
+    def test_webhook_secret_header_remains_checked_constant_time(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn("x_telegram_bot_api_secret_token", source)
         self.assertIn("webhook_secret_token", source)
+        self.assertIn("secrets.compare_digest", source)
         self.assertIn("status_code=403", source)
+
+    def test_public_host_is_guarded_before_routes(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn('@app.middleware("http")', source)
+        self.assertIn("public_surface_allows", source)
+        self.assertIn("request.headers.get(\"host\", \"\")", source)
+        self.assertIn("status_code=404", source)
 
     def test_health_checks_storage_and_can_fail_degraded(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
