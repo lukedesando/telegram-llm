@@ -31,7 +31,7 @@ Accepted in PR #1.
 
 Credential-free source qualification passed before each merge.
 
-### Wave 2 — flight reliability and deployment — SOURCE HARDENING / RUNTIME BOUNDARY
+### Wave 2 — flight reliability and deployment — RUNTIME BOUNDARY
 
 1. Reliability controls. — accepted in PR #5
    - persistent Telegram update processing/completion records in SQLite
@@ -53,7 +53,7 @@ Credential-free source qualification passed before each merge.
    - deployment scripts are executable in the Git tree
    - deployment delta tests: 11/11 passing
 3. Runtime-boundary closeout. — accepted in PR #7; `main` revision `9a54649614f0440e485238bb18d2ba050f47e0cc`
-4. Approved Cloudflare ingress hardening. — source implemented on `wave2-cloudflare-ingress-hardening-20260906`; merge pending
+4. Approved Cloudflare ingress hardening. — accepted in PR #8; merge revision `8e57306aaa6df8d23dfb2605057db2ae70f0fbae`
    - reuse the existing Homebrew remotely managed Cloudflare Tunnel connector rather than creating another connector
    - `WEBHOOK_BASE_URL=https://telegram.desando.org`
    - Cloudflare published application is path-scoped to `/webhook` -> `127.0.0.1:8787`
@@ -62,8 +62,8 @@ Credential-free source qualification passed before each merge.
    - application independently returns 404 for every non-webhook request addressed to the configured public Host
    - Telegram webhook secret is compared in constant time
    - `/health` and operator surfaces remain local/Tailscale-only
-   - `WEBHOOK_BASE_URL` preflight now requires a pathless HTTPS origin
-   - complete credential-free branch suite: 47/47 passing with `ResourceWarning` fatal
+   - `WEBHOOK_BASE_URL` preflight requires a pathless HTTPS origin
+   - complete credential-free suite: 47/47 passing with `ResourceWarning` fatal before merge
 5. Apply the reviewed Cloudflare control-plane configuration. — pending external control-plane action
 6. Prepare/activate the exact standalone Pi release and run local qualification. — pending runtime credentials and host execution
 7. Qualify live Telegram -> relay -> OpenAI -> Telegram delivery. — pending runtime activation
