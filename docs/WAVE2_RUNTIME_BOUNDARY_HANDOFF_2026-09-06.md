@@ -7,7 +7,8 @@ Complete the flight-ready single-user Telegram relay and deploy it as a standalo
 ## Current authoritative source state
 
 - Repository: `lukedesando/telegram-llm`
-- Current accepted `main`: `8e57306aaa6df8d23dfb2605057db2ae70f0fbae`
+- Latest runtime-bearing source revision: `8e57306aaa6df8d23dfb2605057db2ae70f0fbae` (PR #8)
+- PR #9 is a docs-only boundary closeout after that runtime-bearing revision; it changes no application/deployment behavior
 - PR #5: reliability controls — accepted
 - PR #6: standalone Pi deployment/rollback/qualification — accepted
 - PR #7: first runtime-boundary closeout — accepted
