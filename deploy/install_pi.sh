@@ -34,7 +34,7 @@ if [[ $# -eq 2 ]]; then
 fi
 [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected revision must be a full lowercase Git SHA"
 
-for command in git python3 tar install systemctl systemd-analyze curl stat getent; do
+for command in git python3 tar install systemctl systemd-analyze curl stat getent sed; do
     command -v "$command" >/dev/null 2>&1 || fail "required command missing: $command"
 done
 
@@ -78,7 +78,17 @@ else
     trap - EXIT
 fi
 
-systemd-analyze verify "$RELEASE_DIR/deploy/systemd/telegram-llm.service"
+VERIFY_UNIT="$(mktemp /run/telegram-llm-verify.XXXXXX.service)"
+cleanup_verify() {
+    rm -f -- "$VERIFY_UNIT"
+}
+trap cleanup_verify EXIT
+sed "s#/opt/telegram-llm/current#$RELEASE_DIR#g" \
+    "$RELEASE_DIR/deploy/systemd/telegram-llm.service" > "$VERIFY_UNIT"
+systemd-analyze verify "$VERIFY_UNIT"
+rm -f -- "$VERIFY_UNIT"
+trap - EXIT
+
 printf 'PREPARED_REVISION=%s\n' "$EXPECTED_SHA"
 printf 'PREPARED_RELEASE=%s\n' "$RELEASE_DIR"
 
