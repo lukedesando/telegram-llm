@@ -38,6 +38,8 @@ def validate_environment(
         errors.append("WEBHOOK_BASE_URL must be an absolute HTTPS URL")
     if parsed.username or parsed.password:
         errors.append("WEBHOOK_BASE_URL must not embed credentials")
+    if parsed.path:
+        errors.append("WEBHOOK_BASE_URL must be an origin only, without a path")
     if parsed.query or parsed.fragment:
         errors.append("WEBHOOK_BASE_URL must not contain a query or fragment")
     if base_url.endswith("/"):
