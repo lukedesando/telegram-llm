@@ -42,12 +42,14 @@ Credential-free source qualification passed before each merge. Live Telegram -> 
    - immutable releases under `/opt/telegram-llm/releases/<sha>`
    - prepare-only path cannot change the active release/unit
    - activation requires a clean exact `main` SHA and an existing secret environment file
+   - activation is transactional: post-promotion failure restores and verifies the prior managed release/unit/revision plus enabled/active state; failed first install returns to no selected release/unit and inactive state
+   - rollback emits `ACTIVATION_ROLLBACK=COMPLETE` only after restored state is verified; otherwise it emits `ACTIVATION_ROLLBACK=FAILED`
    - systemd unit runs as `luke`, one worker, bound only to `127.0.0.1:8787`
    - startup preflight validates required secrets/configuration without printing secret values and rejects SQLite-path overrides
-   - rollback selects only an already-installed exact release and can validate it even if `current` is broken
+   - rollback helper selects only an already-installed exact release and can validate it even if `current` is broken
    - non-mutating local Pi qualification binds runtime evidence to the expected SHA
    - deployment scripts are executable in the Git tree
-   - deployment delta tests: 10/10 passing
+   - deployment delta tests: 11/11 passing after transactional activation repair
    - exact systemd unit syntax/directives passed `systemd-analyze verify` in a host-like validation sandbox; activation repeats verification on `pi-guy`
 3. Activate the exact release behind a selected public HTTPS webhook route. — pending
 4. Qualify live OpenAI responses and Telegram delivery. — pending
