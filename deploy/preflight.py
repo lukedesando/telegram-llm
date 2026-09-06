@@ -10,10 +10,15 @@ REQUIRED_SECRET_NAMES = (
     "WEBHOOK_SECRET_TOKEN",
     "OPENAI_API_KEY",
 )
+PI_DATABASE_PATH = "/var/lib/telegram-llm/telegram-llm.sqlite3"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-def validate_environment(env: dict[str, str]) -> list[str]:
+def validate_environment(
+    env: dict[str, str],
+    *,
+    expected_database_path: str = PI_DATABASE_PATH,
+) -> list[str]:
     errors: list[str] = []
 
     for name in REQUIRED_SECRET_NAMES:
@@ -43,18 +48,14 @@ def validate_environment(env: dict[str, str]) -> list[str]:
         errors.append("APP_REVISION must be a full 40-character lowercase Git SHA")
 
     database_path = env.get("DATABASE_PATH", "").strip()
-    if not database_path:
-        errors.append("DATABASE_PATH is required")
+    if database_path != expected_database_path:
+        errors.append(f"DATABASE_PATH must be exactly {expected_database_path}")
     else:
-        path = Path(database_path)
-        if not path.is_absolute():
-            errors.append("DATABASE_PATH must be absolute in the Pi service")
-        else:
-            parent = path.parent
-            if not parent.is_dir():
-                errors.append("DATABASE_PATH parent directory does not exist")
-            elif not os.access(parent, os.W_OK | os.X_OK):
-                errors.append("DATABASE_PATH parent directory is not writable")
+        parent = Path(database_path).parent
+        if not parent.is_dir():
+            errors.append("DATABASE_PATH parent directory does not exist")
+        elif not os.access(parent, os.W_OK | os.X_OK):
+            errors.append("DATABASE_PATH parent directory is not writable")
 
     return errors
 
